@@ -665,11 +665,13 @@ struct Runner: Sendable {
         ssh: SSHClient,
         healthCheckState: HealthCheckState
     ) async -> ProvisionerOutcome {
-        logScript(command)
+        let logRedactor = ProvisionerLogRedactor(command: command)
+        let redactedCommand = logRedactor.redact(command)
+        logScript(redactedCommand)
         var attempt = 0
         while true {
             do {
-                let commandLabel = commandSummary(command)
+                let commandLabel = commandSummary(redactedCommand)
                 let labeledCommand = commandLabel.isEmpty ? "provisioner command" : "provisioner command (\(commandLabel))"
                 logger.debug("\(labeledCommand) starting (attempt \(attempt + 1))")
                 let handle = try ssh.start(command: command)
@@ -680,9 +682,9 @@ struct Runner: Sendable {
                 case let .completed(result):
                     let stdoutLabel = commandLabel.isEmpty ? "stdout" : "stdout (\(commandLabel))"
                     let stderrLabel = commandLabel.isEmpty ? "stderr" : "stderr (\(commandLabel))"
-                    logIfNonEmpty(label: stdoutLabel, text: result.stdout)
-                    logIfNonEmpty(label: stderrLabel, text: result.stderr)
-                    logCacheStatusIfPresent(output: result.stdout)
+                    logIfNonEmpty(label: stdoutLabel, text: logRedactor.redact(result.stdout))
+                    logIfNonEmpty(label: stderrLabel, text: logRedactor.redact(result.stderr))
+                    logCacheStatusIfPresent(output: logRedactor.redact(result.stdout))
                     let completionLabel = commandLabel.isEmpty ? "provisioner command" : "provisioner command (\(commandLabel))"
                     logger.info("\(completionLabel) completed with exit code \(result.exitCode)")
                     if isRunnerCommand(command) {
@@ -696,7 +698,7 @@ struct Runner: Sendable {
                         continue
                     }
                     await control.clearProvisioningHandle(handle)
-                    return .failed(error)
+                    return .failed(logRedactor.redact(error))
                 case let .healthCheckFailed(message):
                     logger.warning("healthCheck failed; terminating provisioner command wait: \(message)")
                     await control.terminateProvisioning()
@@ -710,7 +712,7 @@ struct Runner: Sendable {
                 if await retrySSHIfNeeded(error: error, stage: "provisioner", attempt: &attempt) {
                     continue
                 }
-                return .failed(error)
+                return .failed(logRedactor.redact(error))
             }
         }
     }
