@@ -99,6 +99,54 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertTrue(issues.contains(ConfigValidationIssue(severity: .error, message: "runner name must be unique: same.")))
     }
 
+    func testSoftnetBlockRequiresSoftnetAndAValue() throws {
+        let nonSoftnetURL = try writeTempFile(contents: """
+        runners:
+          - name: runner-1
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+              run:
+                network: default
+                softnetBlock: "@host"
+            provisioner:
+              type: script
+              config:
+                run: "echo ok"
+        """)
+        let emptyBlockURL = try writeTempFile(contents: """
+        runners:
+          - name: runner-1
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+              run:
+                network: softnet
+                softnetBlock: " "
+            provisioner:
+              type: script
+              config:
+                run: "echo ok"
+        """)
+
+        let nonSoftnetIssues = ConfigValidator().validate(
+            try Config.load(path: nonSoftnetURL.path)
+        )
+        XCTAssertTrue(nonSoftnetIssues.contains(ConfigValidationIssue(
+            severity: .error,
+            message: "runner runner-1: vm.run.softnetBlock requires vm.run.network: softnet."
+        )))
+        let emptyBlockIssues = ConfigValidator().validate(
+            try Config.load(path: emptyBlockURL.path)
+        )
+        XCTAssertTrue(emptyBlockIssues.contains(ConfigValidationIssue(
+            severity: .error,
+            message: "runner runner-1: vm.run.softnetBlock must not be empty when provided."
+        )))
+    }
+
     func testEmptyRunnerGroupIsRejected() throws {
         let keyURL = try writeTempFile(contents: "key", suffix: ".pem")
         let vm = Config.VM(

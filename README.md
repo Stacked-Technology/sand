@@ -127,6 +127,7 @@ runners:
         noGraphics: true
         noClipboard: true
         network: softnet
+        softnetBlock: "@host"
       cache:
         host: ~/.cache/sand/actions-runner
         name: sand-cache
@@ -144,7 +145,7 @@ runners:
       delay: 60
 ```
 
-Set `vm.run.network` to `softnet` to pass Tart's `--net-softnet` option. Softnet prevents the guest from accessing the host and private network addresses while preserving outbound access to globally routable addresses. It must be installed separately and requires root SUID ownership or passwordless sudo; Sand validates both the binary and privilege setup before starting a runner.
+Set `vm.run.network` to `softnet` to pass Tart's `--net-softnet` option. Softnet restricts private-network access while preserving outbound access to globally routable addresses, but its default policy permits the VM gateway. Set `vm.run.softnetBlock` to `"@host"` to pass Tart's `--net-softnet-block @host` policy and block that host/gateway exception. `softnetBlock` is rejected unless the selected network is `softnet`. Softnet must be installed separately and requires root SUID ownership or passwordless sudo; Sand validates both the binary and privilege setup before starting a runner.
 
 Set `provisioner.config.runnerGroup` to register an organization runner directly in an existing GitHub runner group. Omit it to use GitHub's default runner group. Runner groups require organization-level registration, so `repository` must also be omitted when `runnerGroup` is set.
 

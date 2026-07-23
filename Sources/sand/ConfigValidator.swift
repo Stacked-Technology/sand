@@ -94,6 +94,20 @@ final class ConfigValidator {
         if let diskSizeGb = vm.diskSizeGb, diskSizeGb <= 0 {
             issues.append(.init(severity: .error, message: "vm.diskSizeGb must be greater than 0."))
         }
+        if let softnetBlock = vm.run.softnetBlock {
+            if vm.run.network != .softnet {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.softnetBlock requires vm.run.network: softnet."
+                ))
+            }
+            if softnetBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.softnetBlock must not be empty when provided."
+                ))
+            }
+        }
 
         if vm.ssh.user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             issues.append(.init(severity: .error, message: "vm.ssh.user must not be empty."))
