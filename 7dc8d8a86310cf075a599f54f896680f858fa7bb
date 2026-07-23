@@ -1,0 +1,23 @@
+intent:
+  id: "intent/2026-07-23/supervise-detached-tart#7dc8d8a"
+  change_type: "fix"
+  scope: "process lifecycle"
+  summary: "Prevent detached Tart and SSH processes from stalling, escaping cleanup, or exhausting host memory."
+  decision: "Continuously drain bounded process output, retain and monitor Tart handles through VM readiness, supervise stop/delete with deadlines and TERM-to-SIGKILL escalation, and make concurrent cleanup callers join the same teardown."
+  constraints:
+    - "Long-running process diagnostics must remain bounded while structured command output remains large enough for Tart status parsing."
+    - "Cancellation and signal shutdown must not leave Tart or destructive cleanup processes unsupervised."
+    - "Runner VM network, mount, clipboard, graphics, audio, and ephemeral-isolation settings must remain unchanged."
+    - "GitHub runner registration token redaction must remain intact."
+  intent_priority: "must"
+  code_locations:
+    - "Sources/sand/ProcessRunner.swift"
+    - "Sources/sand/Runner.swift::waitForVMReady"
+    - "Sources/sand/Tart.swift"
+    - "Sources/sand/VMShutdownCoordinator.swift"
+    - "Tests/sandTests/ProcessRunnerTests.swift"
+    - "Tests/sandTests/VMShutdownCoordinatorTests.swift"
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: "codex-cli"
+    model: "gpt-5"
