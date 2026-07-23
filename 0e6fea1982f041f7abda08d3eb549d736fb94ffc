@@ -1,0 +1,22 @@
+intent:
+  id: "intent/2026-07-22/isolated-macos-runners#0e6fea1982f0"
+  change_type: "feat"
+  scope: "runners"
+  summary: "Support host-isolated Softnet VMs and restricted organization runner groups."
+  decision: "Expose Tart Softnet networking and GitHub runner-group registration as opt-in configuration while preserving existing defaults; fail early when Softnet or runner scope is misconfigured."
+  constraints:
+    - "Existing Sand configurations must retain default Tart networking and GitHub's default runner group."
+    - "Runner groups must use organization-level registration and cannot be combined with repository-scoped registration."
+    - "Non-interactive Softnet use must require an executable plus durable SUID-root or passwordless-sudo readiness."
+    - "Runner jobs must remain ephemeral."
+  intent_priority: "must"
+  code_locations:
+    - "Sources/sand/Config.swift::Config.RunOptions"
+    - "Sources/sand/Tart.swift::Tart.RunOptions"
+    - "Sources/sand/GitHub/GitHubProvisioner.swift::GitHubProvisionerConfig"
+    - "Sources/sand/DependencyChecker.swift::softnetPrivilegesAreConfigured"
+    - "Sources/sand/ConfigValidator.swift::validateProvisioner"
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: "codex-cli"
+    model: "gpt-5"
