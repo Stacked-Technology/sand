@@ -1,0 +1,17 @@
+intent:
+  id: "intent/2026-07-22/brew-softnet-trust#8ecd609687aa"
+  change_type: "ci"
+  scope: "brew"
+  summary: "Allow Homebrew CI to load Tart's Softnet dependency under tap-trust enforcement."
+  decision: "Trust the cirruslabs/cli/softnet formula explicitly alongside Tart before installing Sand."
+  constraints:
+    - "Keep trust formula-scoped rather than trusting the entire cirruslabs/cli tap."
+    - "Do not disable Homebrew tap-trust enforcement."
+    - "Preserve Tart and Softnet as formula-managed dependencies."
+  intent_priority: "must"
+  code_locations:
+    - ".github/workflows/ci.yml::jobs.brew"
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: "codex-cli"
+    model: "gpt-5"
