@@ -1,0 +1,17 @@
+intent:
+  id: "intent/2026-07-22/brew-tart-trust#876a543ea22c"
+  change_type: "ci"
+  scope: "brew"
+  summary: "Allow the Sand Homebrew CI job to resolve its Tart dependency under tap-trust enforcement."
+  decision: "Explicitly tap cirruslabs/cli and trust only the cirruslabs/cli/tart formula before installing the local Sand formula."
+  constraints:
+    - "Keep trust scoped to the Tart formula rather than trusting the entire tap."
+    - "Do not disable Homebrew tap-trust enforcement."
+    - "Do not alter the Sand formula dependency."
+  intent_priority: "must"
+  code_locations:
+    - ".github/workflows/ci.yml::jobs.brew"
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: "codex-cli"
+    model: "gpt-5"
