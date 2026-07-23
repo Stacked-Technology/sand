@@ -1,0 +1,19 @@
+intent:
+  id: "intent/2026-07-23/redact-runner-registration-tokens#3a9512d83eea"
+  change_type: "fix"
+  scope: "runner logging"
+  summary: "Prevent ephemeral GitHub runner registration tokens from being persisted in Sand logs."
+  decision: "Derive sensitive values from provisioner --token arguments, execute the original command unchanged, and redact those values from command logs, summaries, command output, and propagated process failures."
+  constraints:
+    - "Runner registration behavior and ephemeral lifecycle must remain unchanged."
+    - "Sensitive values must not appear in normal or failure-path logging."
+    - "Unrelated provisioner commands and output must remain unchanged."
+  intent_priority: "must"
+  code_locations:
+    - "Sources/sand/ProvisionerLogRedactor.swift"
+    - "Sources/sand/Runner.swift::runProvisionerCommand"
+    - "Tests/sandTests/ProvisionerLogRedactorTests.swift"
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: "codex-cli"
+    model: "gpt-5"
