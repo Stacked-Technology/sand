@@ -26,6 +26,11 @@ struct Runner: Sendable {
         let name: String
     }
 
+    private enum VMStartupOutcome {
+        case ready(SSHClient)
+        case failed(RestartReason)
+    }
+
     init(
         tart: Tart,
         github: GitHubService?,
@@ -128,32 +133,47 @@ struct Runner: Sendable {
         )
         logRunOptions(name: name, options: runOptions)
         logger.info("boot VM \(name)")
+        let vmRunHandle: ProcessHandle
         do {
-            try await tart.run(name: name, options: runOptions)
+            vmRunHandle = try await tart.run(name: name, options: runOptions)
         } catch {
             logger.error("tart run failed for \(name): \(String(describing: error))")
             await shutdownCoordinator.cleanup(reason: "tart run failed")
             throw error
         }
+        await shutdownCoordinator.setRunHandle(vmRunHandle)
+        let startupOutcome = await waitForVMReady(
+            name: name,
+            vm: vm,
+            runHandle: vmRunHandle
+        )
+        let ssh: SSHClient
+        switch startupOutcome {
+        case let .ready(client):
+            ssh = client
+        case let .failed(reason):
+            logger.debug("VM startup failed; scheduling restart (\(reason))")
+            await scheduleRestart(reason: reason)
+            await shutdownCoordinator.cleanup(reason: "VM startup failed")
+            return
+        }
         await logVMStatusAfterBoot(name: name)
-        logger.info("wait for VM IP")
-        let ip: String
-        do {
-            ip = try await resolveIP(name: name)
-        } catch {
-            logger.warning("resolve VM IP failed; scheduling restart: \(String(describing: error))")
-            await scheduleRestart(reason: .ipNotReady)
-            await shutdownCoordinator.cleanup(reason: "resolve VM IP failed")
-            return
-        }
-        logger.info("VM IP \(ip)")
-        let ssh = SSHClient(processRunner: tart.processRunner, host: ip, config: vm.ssh)
-        guard await waitForSSH(ssh: ssh) else {
-            logger.debug("waitForSSH failed; scheduling restart")
-            await scheduleRestart(reason: .sshNotReady)
-            await shutdownCoordinator.cleanup(reason: "ssh not ready")
-            return
-        }
+        try await runProvisioning(
+            name: name,
+            vm: vm,
+            ssh: ssh,
+            runnerCacheInfo: runnerCacheInfo,
+            provisionerConfig: provisionerConfig
+        )
+    }
+
+    private func runProvisioning(
+        name: String,
+        vm: Config.VM,
+        ssh: SSHClient,
+        runnerCacheInfo: RunnerCacheInfo?,
+        provisionerConfig: Config.Provisioner
+    ) async throws {
         if let preRun = config.preRun {
             logger.info("run preRun")
             logScript(preRun)
@@ -299,6 +319,60 @@ struct Runner: Sendable {
         await stopHealthCheck(healthCheckTask)
         await shutdownCoordinator.cleanup(reason: "runOnce complete")
         logger.debug("runOnce complete (vm=\(vmName))")
+    }
+
+    private func waitForVMReady(
+        name: String,
+        vm: Config.VM,
+        runHandle: ProcessHandle
+    ) async -> VMStartupOutcome {
+        await withTaskGroup(of: VMStartupOutcome.self) { group in
+            group.addTask {
+                self.logger.info("wait for VM IP")
+                do {
+                    let ip = try await self.resolveIP(name: name)
+                    self.logger.info("VM IP \(ip)")
+                    let ssh = SSHClient(
+                        processRunner: self.tart.processRunner,
+                        host: ip,
+                        config: vm.ssh
+                    )
+                    guard await self.waitForSSH(ssh: ssh) else {
+                        return .failed(.sshNotReady)
+                    }
+                    return .ready(ssh)
+                } catch is CancellationError {
+                    return .failed(.stageFailed("VM startup"))
+                } catch {
+                    self.logger.warning(
+                        "resolve VM IP failed; scheduling restart: \(String(describing: error))"
+                    )
+                    return .failed(.ipNotReady)
+                }
+            }
+            group.addTask {
+                do {
+                    let result = try await runHandle.waitAsync(terminateOnCancel: false)
+                    self.logger.error(
+                        "tart run exited before VM startup completed with code \(result.exitCode)"
+                    )
+                    self.logIfNonEmpty(label: "tart stdout", text: result.stdout)
+                    self.logIfNonEmpty(label: "tart stderr", text: result.stderr)
+                    return .failed(.stageFailed("tart run"))
+                } catch is CancellationError {
+                    return .failed(.stageFailed("VM startup"))
+                } catch {
+                    self.logStageFailure(error, stage: "tart run")
+                    return .failed(.stageFailed("tart run"))
+                }
+            }
+
+            guard let first = await group.next() else {
+                return .failed(.stageFailed("VM startup"))
+            }
+            group.cancelAll()
+            return first
+        }
     }
 
     private func applyVMConfigIfNeeded(name: String, vm: Config.VM) async throws {
@@ -828,7 +902,7 @@ struct Runner: Sendable {
                 return false
             }
             return command.first == "sshpass"
-        case .invalidCommand:
+        case .invalidCommand, .timedOut:
             return false
         }
     }
@@ -991,6 +1065,8 @@ struct Runner: Sendable {
                 logIfNonEmpty(label: "stderr", text: stderr)
             case .invalidCommand:
                 logger.error("\(stage) failed: invalid command")
+            case .timedOut:
+                logger.error("\(stage) failed: process timed out")
             }
             return
         }

@@ -1,6 +1,6 @@
 import Foundation
 
-struct VMDestroyer {
+struct VMDestroyer: Sendable {
     let tart: Tart
     let logger: Logger
 
