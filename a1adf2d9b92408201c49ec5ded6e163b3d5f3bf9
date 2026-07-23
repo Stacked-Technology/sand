@@ -1,0 +1,24 @@
+intent:
+  id: intent/2026-07-22/softnet-host-block
+  change_type: fix
+  scope: macOS runner network isolation
+  summary: Block Softnet's default host-gateway exception for untrusted runner VMs.
+  decision:
+    - Expose vm.run.softnetBlock and pass it as Tart's --net-softnet-block argument only with Softnet networking.
+    - Configure the Stacked runner with the Softnet-native @host target so public outbound traffic remains available while host and gateway access are denied.
+  constraints:
+    - Existing configurations retain their current networking behavior unless softnetBlock is explicitly set.
+    - softnetBlock is invalid without vm.run.network set to softnet.
+    - Runner jobs remain ephemeral and require no host mounts or cache.
+  intent_priority: must
+  code_locations:
+    - Sources/sand/Config.swift
+    - Sources/sand/ConfigValidator.swift
+    - Sources/sand/Runner.swift
+    - Sources/sand/Tart.swift
+    - Tests/sandTests/TartTests.swift
+    - README.md
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: Codex
+    model: GPT-5
