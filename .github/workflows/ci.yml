@@ -4,6 +4,8 @@ on:
     branches:
       - main
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: macos-26
@@ -16,6 +18,7 @@ jobs:
   brew:
     runs-on: macos-15
     env:
+      CIRRUSLABS_CLI_REVISION: "4fef6a32df31b4c51bf745ae2d86b53a037a1a6c"
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +27,7 @@ jobs:
           swift-version: "6.2"
       - run: echo "HOMEBREW_SWIFT=$(which swift)" >> "$GITHUB_ENV"
       - run: brew tap cirruslabs/cli
+      - run: git -C "$(brew --repo cirruslabs/cli)" checkout --detach "$CIRRUSLABS_CLI_REVISION"
       - run: brew trust --formula cirruslabs/cli/tart
       - run: brew trust --formula cirruslabs/cli/softnet
       - run: brew tap-new local/sand
