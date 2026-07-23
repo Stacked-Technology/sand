@@ -25,6 +25,7 @@ jobs:
       - run: echo "HOMEBREW_SWIFT=$(which swift)" >> "$GITHUB_ENV"
       - run: brew tap cirruslabs/cli
       - run: brew trust --formula cirruslabs/cli/tart
+      - run: brew trust --formula cirruslabs/cli/softnet
       - run: brew tap-new local/sand
       - run: cp Formula/sand.rb "$(brew --repo local/sand)/Formula/sand.rb"
       - run: brew install --HEAD local/sand/sand
