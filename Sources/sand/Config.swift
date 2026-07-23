@@ -182,13 +182,25 @@ struct Config: Decodable, Sendable {
         let noGraphics: Bool
         let noClipboard: Bool
         let network: Network
+        let softnetBlock: String?
 
-        static let `default` = RunOptions(noGraphics: true, noClipboard: false, network: .default)
+        static let `default` = RunOptions(
+            noGraphics: true,
+            noClipboard: false,
+            network: .default,
+            softnetBlock: nil
+        )
 
-        init(noGraphics: Bool, noClipboard: Bool, network: Network) {
+        init(
+            noGraphics: Bool,
+            noClipboard: Bool,
+            network: Network,
+            softnetBlock: String? = nil
+        ) {
             self.noGraphics = noGraphics
             self.noClipboard = noClipboard
             self.network = network
+            self.softnetBlock = softnetBlock
         }
 
         init(from decoder: Decoder) throws {
@@ -196,12 +208,14 @@ struct Config: Decodable, Sendable {
             self.noGraphics = try container.decodeIfPresent(Bool.self, forKey: .noGraphics) ?? true
             self.noClipboard = try container.decodeIfPresent(Bool.self, forKey: .noClipboard) ?? false
             self.network = try container.decodeIfPresent(Network.self, forKey: .network) ?? .default
+            self.softnetBlock = try container.decodeIfPresent(String.self, forKey: .softnetBlock)
         }
 
         private enum CodingKeys: String, CodingKey {
             case noGraphics
             case noClipboard
             case network
+            case softnetBlock
         }
     }
 

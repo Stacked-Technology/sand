@@ -38,13 +38,15 @@ struct Tart: Sendable {
         let noGraphics: Bool
         let noClipboard: Bool
         let network: Network
+        let softnetBlock: String?
 
         static let `default` = RunOptions(
             directoryMounts: [],
             noAudio: false,
             noGraphics: true,
             noClipboard: false,
-            network: .default
+            network: .default,
+            softnetBlock: nil
         )
     }
 
@@ -127,6 +129,9 @@ struct Tart: Sendable {
         }
         if options.network == .softnet {
             arguments.append("--net-softnet")
+            if let softnetBlock = options.softnetBlock {
+                arguments.append(contentsOf: ["--net-softnet-block", softnetBlock])
+            }
         }
         for mount in options.directoryMounts {
             arguments.append("--dir")

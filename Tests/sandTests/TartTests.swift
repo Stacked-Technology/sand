@@ -62,12 +62,17 @@ final class TartTests: XCTestCase {
             noAudio: true,
             noGraphics: false,
             noClipboard: true,
-            network: .softnet
+            network: .softnet,
+            softnetBlock: "@host"
         )
         try await tart.run(name: "ephemeral", options: options)
         XCTAssertEqual(runner.calls.first, .init(
             executable: "tart",
-            arguments: ["run", "ephemeral", "--no-audio", "--no-clipboard", "--net-softnet", "--dir", "dir:/tmp/dir:ro"],
+            arguments: [
+                "run", "ephemeral", "--no-audio", "--no-clipboard",
+                "--net-softnet", "--net-softnet-block", "@host",
+                "--dir", "dir:/tmp/dir:ro"
+            ],
             wait: false
         ))
     }
