@@ -1,0 +1,18 @@
+intent:
+  id: "intent/2026-07-22/pin-homebrew-tap#3ae08bc1c75c"
+  change_type: "ci"
+  scope: "brew"
+  summary: "Constrain trusted third-party Homebrew formula execution in Sand CI."
+  decision: "Pin cirruslabs/homebrew-cli to a reviewed commit before formula trust and limit the workflow token to read-only repository contents."
+  constraints:
+    - "Keep Tart and Softnet trust formula-scoped."
+    - "Do not execute formulas from a mutable third-party tap branch."
+    - "Grant no write permission to the GitHub Actions token."
+  intent_priority: "must"
+  code_locations:
+    - ".github/workflows/ci.yml::permissions"
+    - ".github/workflows/ci.yml::jobs.brew"
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: "codex-cli"
+    model: "gpt-5"
