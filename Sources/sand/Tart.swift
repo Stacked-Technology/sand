@@ -116,7 +116,7 @@ struct Tart: Sendable {
         _ = try await run(arguments: arguments, wait: true)
     }
 
-    func run(name: String, options: RunOptions = .default) async throws {
+    func run(name: String, options: RunOptions = .default) async throws -> ProcessHandle {
         var arguments = ["run", name]
         if options.noGraphics {
             arguments.append("--no-graphics")
@@ -137,7 +137,12 @@ struct Tart: Sendable {
             arguments.append("--dir")
             arguments.append(mount.runArgument)
         }
-        _ = try await run(arguments: arguments, wait: false)
+        logger.debug("tart \(arguments.joined(separator: " "))")
+        return try processRunner.startBounded(
+            executable: "tart",
+            arguments: arguments,
+            maximumCaptureBytes: 65_536
+        )
     }
 
     func ip(name: String, wait: Int) async throws -> String {
@@ -154,11 +159,17 @@ struct Tart: Sendable {
         if let timeout {
             arguments.append(contentsOf: ["--timeout", String(timeout)])
         }
-        _ = try await run(arguments: arguments, wait: true)
+        _ = try await run(
+            arguments: arguments,
+            timeout: .seconds((timeout ?? 30) + 5)
+        )
     }
 
     func delete(name: String) async throws {
-        _ = try await run(arguments: ["delete", name], wait: true)
+        _ = try await run(
+            arguments: ["delete", name],
+            timeout: .seconds(15)
+        )
     }
 
     func isRunning(name: String) async throws -> Bool {
@@ -226,5 +237,15 @@ struct Tart: Sendable {
     private func run(arguments: [String], wait: Bool) async throws -> ProcessResult? {
         logger.debug("tart \(arguments.joined(separator: " "))")
         return try await processRunner.run(executable: "tart", arguments: arguments, wait: wait)
+    }
+
+    private func run(arguments: [String], timeout: Duration) async throws -> ProcessResult {
+        logger.debug("tart \(arguments.joined(separator: " "))")
+        let handle = try processRunner.startBounded(
+            executable: "tart",
+            arguments: arguments,
+            maximumCaptureBytes: 1_024 * 1_024
+        )
+        return try await waitForProcess(handle, timeout: timeout)
     }
 }

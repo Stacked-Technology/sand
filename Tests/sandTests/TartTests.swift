@@ -48,8 +48,8 @@ final class TartTests: XCTestCase {
     func testRunArgs() async throws {
         let runner = MockProcessRunner()
         let tart = makeTart(runner)
-        try await tart.run(name: "ephemeral")
-        XCTAssertEqual(runner.calls.first, .init(executable: "tart", arguments: ["run", "ephemeral", "--no-graphics"], wait: false))
+        _ = try await tart.run(name: "ephemeral")
+        XCTAssertEqual(runner.startCalls.first, .init(executable: "tart", arguments: ["run", "ephemeral", "--no-graphics"], wait: false))
     }
 
     func testRunArgsWithOptions() async throws {
@@ -65,8 +65,8 @@ final class TartTests: XCTestCase {
             network: .softnet,
             softnetBlock: "@host"
         )
-        try await tart.run(name: "ephemeral", options: options)
-        XCTAssertEqual(runner.calls.first, .init(
+        _ = try await tart.run(name: "ephemeral", options: options)
+        XCTAssertEqual(runner.startCalls.first, .init(
             executable: "tart",
             arguments: [
                 "run", "ephemeral", "--no-audio", "--no-clipboard",
@@ -87,6 +87,27 @@ final class TartTests: XCTestCase {
             arguments: ["set", "ephemeral", "--cpu", "4", "--memory", "4096", "--display", "1920x1080px", "--display-refit", "--disk-size", "80"],
             wait: true
         ))
+    }
+
+    func testStopAndDeleteUseSupervisedProcesses() async throws {
+        let runner = MockProcessRunner()
+        let tart = makeTart(runner)
+
+        try await tart.stop(name: "ephemeral", timeout: 30)
+        try await tart.delete(name: "ephemeral")
+
+        XCTAssertEqual(runner.startCalls, [
+            .init(
+                executable: "tart",
+                arguments: ["stop", "ephemeral", "--timeout", "30"],
+                wait: false
+            ),
+            .init(
+                executable: "tart",
+                arguments: ["delete", "ephemeral"],
+                wait: false
+            )
+        ])
     }
 
     func testIpArgs() async throws {
