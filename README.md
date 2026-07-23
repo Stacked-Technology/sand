@@ -7,6 +7,7 @@ Self-hosted macOS CI Runners powered by Tart - Apple's Virtualization framework.
 - macOS 15+ running on Apple Silicon machines.
 - Tart installed and available in PATH
 - sand uses tart. it helps understanding tart before using sand (https://tart.run/quick-start/)
+- Softnet installed and configured with root SUID ownership or passwordless sudo when using `vm.run.network: softnet`
 
 ## Caveats
 
@@ -122,6 +123,10 @@ runners:
       source:
         type: oci
         image: ghcr.io/cirruslabs/macos-runner:tahoe
+      run:
+        noGraphics: true
+        noClipboard: true
+        network: softnet
       cache:
         host: ~/.cache/sand/actions-runner
         name: sand-cache
@@ -130,14 +135,18 @@ runners:
       config:
         appId: 123456
         organization: my-org
-        repository: my-repo
         privateKeyPath: ~/my-app.private-key.pem
         runnerName: runner-1
+        runnerGroup: mac-runners
     healthCheck:
       command: "pgrep -fl /Users/admin/actions-runner/run.sh"
       interval: 30
       delay: 60
 ```
+
+Set `vm.run.network` to `softnet` to pass Tart's `--net-softnet` option. Softnet prevents the guest from accessing the host and private network addresses while preserving outbound access to globally routable addresses. It must be installed separately and requires root SUID ownership or passwordless sudo; Sand validates both the binary and privilege setup before starting a runner.
+
+Set `provisioner.config.runnerGroup` to register an organization runner directly in an existing GitHub runner group. Omit it to use GitHub's default runner group. Runner groups require organization-level registration, so `repository` must also be omitted when `runnerGroup` is set.
 
 To enable runner caching, set `vm.cache`. The GitHub provisioner reuses the Actions runner archive from that mount between restarts; on a cache miss it downloads the tarball and stores it in the mounted directory. On macOS guests, the cache directory resolves to `/Volumes/My Shared Files/<name>` (with `name` acting as the share name).
 

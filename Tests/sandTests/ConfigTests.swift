@@ -25,6 +25,7 @@ final class ConfigTests: XCTestCase {
               run:
                 noGraphics: false
                 noClipboard: true
+                network: softnet
               diskSizeGb: 80
               ssh:
                 user: admin
@@ -40,6 +41,7 @@ final class ConfigTests: XCTestCase {
                 privateKeyPath: ~/key.pem
                 runnerName: runner-1
                 extraLabels: [fast, arm64]
+                runnerGroup: mac-runners
             preRun: |
               echo "pre-run"
             postRun: |
@@ -65,6 +67,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runners.first?.vm.mounts.first?.mode, .ro)
         XCTAssertEqual(config.runners.first?.vm.run.noGraphics, false)
         XCTAssertEqual(config.runners.first?.vm.run.noClipboard, true)
+        XCTAssertEqual(config.runners.first?.vm.run.network, .softnet)
         XCTAssertEqual(config.runners.first?.vm.diskSizeGb, 80)
         XCTAssertEqual(config.runners.first?.vm.ssh.user, "admin")
         XCTAssertEqual(config.runners.first?.vm.ssh.password, "admin")
@@ -75,6 +78,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runners.first?.provisioner.github?.organization, "acme")
         XCTAssertEqual(config.runners.first?.provisioner.github?.repository, "repo")
         XCTAssertEqual(config.runners.first?.provisioner.github?.extraLabels ?? [], ["fast", "arm64"])
+        XCTAssertEqual(config.runners.first?.provisioner.github?.runnerGroup, "mac-runners")
         XCTAssertTrue(config.runners.first?.provisioner.github?.privateKeyPath.hasPrefix(home) ?? false)
         XCTAssertTrue(config.runners.first?.preRun?.contains("pre-run") ?? false)
         XCTAssertTrue(config.runners.first?.postRun?.contains("post-run") ?? false)
@@ -112,6 +116,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runners.first?.vm.source.resolvedSource, "ghcr.io/acme/vm:latest")
         XCTAssertEqual(config.runners.first?.vm.run.noGraphics, true)
         XCTAssertEqual(config.runners.first?.vm.run.noClipboard, false)
+        XCTAssertEqual(config.runners.first?.vm.run.network, .default)
         XCTAssertEqual(config.runners.first?.vm.ssh.user, "runner")
         XCTAssertEqual(config.runners.first?.vm.ssh.password, "secret")
         XCTAssertEqual(config.runners.first?.vm.ssh.port, 2222)

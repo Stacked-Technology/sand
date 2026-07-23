@@ -174,25 +174,34 @@ struct Config: Decodable, Sendable {
     }
 
     struct RunOptions: Decodable, Sendable {
+        enum Network: String, Decodable, Sendable, Equatable {
+            case `default`
+            case softnet
+        }
+
         let noGraphics: Bool
         let noClipboard: Bool
+        let network: Network
 
-        static let `default` = RunOptions(noGraphics: true, noClipboard: false)
+        static let `default` = RunOptions(noGraphics: true, noClipboard: false, network: .default)
 
-        init(noGraphics: Bool, noClipboard: Bool) {
+        init(noGraphics: Bool, noClipboard: Bool, network: Network) {
             self.noGraphics = noGraphics
             self.noClipboard = noClipboard
+            self.network = network
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.noGraphics = try container.decodeIfPresent(Bool.self, forKey: .noGraphics) ?? true
             self.noClipboard = try container.decodeIfPresent(Bool.self, forKey: .noClipboard) ?? false
+            self.network = try container.decodeIfPresent(Network.self, forKey: .network) ?? .default
         }
 
         private enum CodingKeys: String, CodingKey {
             case noGraphics
             case noClipboard
+            case network
         }
     }
 
@@ -419,7 +428,8 @@ extension Config.Provisioner {
                 repository: github.repository,
                 privateKeyPath: Config.expandPath(github.privateKeyPath),
                 runnerName: github.runnerName,
-                extraLabels: github.extraLabels
+                extraLabels: github.extraLabels,
+                runnerGroup: github.runnerGroup
             )
             return Config.Provisioner(type: type, script: nil, github: expanded)
         }

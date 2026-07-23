@@ -156,6 +156,15 @@ final class ConfigValidator {
             if github.runnerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 issues.append(.init(severity: .error, message: "provisioner.config.runnerName must not be empty."))
             }
+            if let runnerGroup = github.runnerGroup, runnerGroup.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                issues.append(.init(severity: .error, message: "provisioner.config.runnerGroup must not be empty when set."))
+            }
+            if github.runnerGroup != nil, github.repository != nil {
+                issues.append(.init(
+                    severity: .error,
+                    message: "provisioner.config.runnerGroup requires organization-level registration; omit provisioner.config.repository."
+                ))
+            }
             let keyPath = github.privateKeyPath.trimmingCharacters(in: .whitespacesAndNewlines)
             if keyPath.isEmpty {
                 issues.append(.init(severity: .error, message: "provisioner.config.privateKeyPath must not be empty."))
