@@ -24,12 +24,21 @@ struct Run: AsyncParsableCommand {
         let logSink = try logLevel.makeLogFileSink()
         let logger = Logger(label: "sand", minimumLevel: level, sink: logSink)
         logger.info("=== sand run start ===")
-        let requiredDependencies = dryRun ? ["tart"] : ["tart", "sshpass", "ssh"]
+        let config = try Config.load(path: config)
+        let usesSoftnet = config.runners.contains { $0.vm.run.network == .softnet }
+        var requiredDependencies = dryRun ? ["tart"] : ["tart", "sshpass", "ssh"]
+        if usesSoftnet, !dryRun {
+            requiredDependencies.append("softnet")
+        }
         let missing = DependencyChecker.missingCommands(requiredDependencies)
         if !missing.isEmpty {
             throw ValidationError("Missing required dependencies in PATH: \(missing.joined(separator: ", ")). Install them and re-run.")
         }
-        let config = try Config.load(path: config)
+        if usesSoftnet, !dryRun, !DependencyChecker.softnetPrivilegesAreConfigured() {
+            throw ValidationError(
+                "Softnet requires root SUID ownership or passwordless sudo before non-interactive use. Complete Softnet's privilege setup and re-run."
+            )
+        }
         let validator = ConfigValidator()
         let issues = validator.validate(config)
         let errors = issues.filter { $0.severity == .error }

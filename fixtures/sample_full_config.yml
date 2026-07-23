@@ -22,6 +22,7 @@ runners:
       run:
         noGraphics: true
         noClipboard: false
+        network: default
       diskSizeGb: null
       ssh:
         user: admin
@@ -65,6 +66,7 @@ runners:
         privateKeyPath: ~/my-app.private-key.pem
         runnerName: runner-2
         extraLabels: null
+        runnerGroup: null
     healthCheck:
       command: "pgrep -fl /Users/admin/actions-runner/run.sh"
       interval: 30

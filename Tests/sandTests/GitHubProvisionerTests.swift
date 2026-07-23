@@ -49,6 +49,27 @@ final class GitHubProvisionerTests: XCTestCase {
         XCTAssertTrue(joined.contains("actions-runner-${runner_os}-${runner_arch}"))
         XCTAssertTrue(joined.contains("version=\"\(runnerVersion)\""))
         XCTAssertFalse(joined.contains("runner cache"))
+        XCTAssertFalse(joined.contains("--runnergroup"))
+    }
+
+    func testScriptWithRunnerGroup() {
+        let provisioner = GitHubProvisioner()
+        let config = GitHubProvisionerConfig(
+            appId: 1,
+            organization: "org",
+            repository: nil,
+            privateKeyPath: "/tmp/key.pem",
+            runnerName: "runner-1",
+            extraLabels: nil,
+            runnerGroup: "Mac Runner's"
+        )
+        let script = provisioner.script(
+            config: config,
+            runnerToken: "token",
+            runnerVersion: "2.999.0"
+        )
+        let joined = script.joined(separator: "\n")
+        XCTAssertTrue(joined.contains("--runnergroup 'Mac Runner'\\''s'"))
     }
 
     func testScriptIncludesRunnerCacheLogic() {

@@ -83,11 +83,28 @@ struct Doctor: AsyncParsableCommand {
             let config = try Config.load(path: path)
             let validator = ConfigValidator()
             var issues = validator.validate(config)
+            issues.append(contentsOf: checkSoftnet(config))
             issues.append(contentsOf: checkRunnerCacheAssets(config))
             return issues
         } catch {
             return [ConfigValidationIssue(severity: .error, message: "Failed to load config at \(path): \(error.localizedDescription)")]
         }
+    }
+
+    private func checkSoftnet(_ config: Config) -> [ConfigValidationIssue] {
+        guard config.runners.contains(where: { $0.vm.run.network == .softnet }) else {
+            return []
+        }
+        if !DependencyChecker.missingCommands(["softnet"]).isEmpty {
+            return [.init(severity: .error, message: "Missing required dependency in PATH: softnet.")]
+        }
+        if !DependencyChecker.softnetPrivilegesAreConfigured() {
+            return [.init(
+                severity: .error,
+                message: "Softnet requires root SUID ownership or passwordless sudo before non-interactive use."
+            )]
+        }
+        return []
     }
 
     private func checkRunnerCacheAssets(_ config: Config) -> [ConfigValidationIssue] {

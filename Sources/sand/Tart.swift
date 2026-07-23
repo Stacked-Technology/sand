@@ -28,12 +28,24 @@ struct Tart: Sendable {
     }
 
     struct RunOptions {
+        enum Network: Equatable {
+            case `default`
+            case softnet
+        }
+
         let directoryMounts: [DirectoryMount]
         let noAudio: Bool
         let noGraphics: Bool
         let noClipboard: Bool
+        let network: Network
 
-        static let `default` = RunOptions(directoryMounts: [], noAudio: false, noGraphics: true, noClipboard: false)
+        static let `default` = RunOptions(
+            directoryMounts: [],
+            noAudio: false,
+            noGraphics: true,
+            noClipboard: false,
+            network: .default
+        )
     }
 
     struct Display {
@@ -112,6 +124,9 @@ struct Tart: Sendable {
         }
         if options.noClipboard {
             arguments.append("--no-clipboard")
+        }
+        if options.network == .softnet {
+            arguments.append("--net-softnet")
         }
         for mount in options.directoryMounts {
             arguments.append("--dir")
