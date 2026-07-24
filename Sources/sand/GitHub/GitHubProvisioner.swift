@@ -1,3 +1,12 @@
+struct GitHubProvisioningPlan {
+    let setupCommands: [String]
+    let runnerCommand: String
+
+    var allCommands: [String] {
+        setupCommands + [runnerCommand]
+    }
+}
+
 struct GitHubProvisionerConfig: Decodable, Sendable {
     let appId: Int
     let organization: String
@@ -34,25 +43,27 @@ struct GitHubProvisioner: Sendable {
         runnerToken: String,
         runnerVersion: String,
         cacheDirectory: String? = nil
-    ) -> [String] {
+    ) -> GitHubProvisioningPlan {
         let labels = labelsString(extraLabels: config.extraLabels)
         let url = runnerURL(organization: config.organization, repository: config.repository)
         let cacheScript = runnerCacheScript(cacheDirectory: cacheDirectory)
         let runnerGroupArgument = config.runnerGroup.map { " --runnergroup \(shellQuote($0))" } ?? ""
-        return [
-            """
+        return GitHubProvisioningPlan(
+            setupCommands: [
+                """
 \(Self.runnerAssetScript(runnerVersion: runnerVersion))
 download_url=https://github.com/actions/runner/releases/download/v${version}/${asset}
 echo $download_url
 \(cacheScript)
 """,
-            "rm -rf ~/actions-runner && mkdir ~/actions-runner",
-            "tar xzf ./actions-runner.tar.gz -C ~/actions-runner",
-            "echo \"Runner downloaded and extracted\"",
-            "~/actions-runner/config.sh --url \(url) --name \(config.runnerName) --token \(runnerToken) --ephemeral --unattended --replace --labels \(labels)\(runnerGroupArgument)",
-            "echo \"Runner script downloaded, starting ~/actions-runner/run.sh\"",
-            "~/actions-runner/run.sh"
-        ]
+                "rm -rf ~/actions-runner && mkdir ~/actions-runner",
+                "tar xzf ./actions-runner.tar.gz -C ~/actions-runner",
+                "echo \"Runner downloaded and extracted\"",
+                "~/actions-runner/config.sh --url \(url) --name \(config.runnerName) --token \(runnerToken) --ephemeral --unattended --replace --labels \(labels)\(runnerGroupArgument)",
+                "echo \"Runner script downloaded, starting ~/actions-runner/run.sh\""
+            ],
+            runnerCommand: "~/actions-runner/run.sh"
+        )
     }
 
     private func shellQuote(_ value: String) -> String {

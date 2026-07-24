@@ -133,14 +133,20 @@ struct Runner: Sendable {
         )
         logRunOptions(name: name, options: runOptions)
         logger.info("boot VM \(name)")
-        let vmRunHandle: ProcessHandle
+        let vmRunSession: Tart.RunSession
         do {
-            vmRunHandle = try await tart.run(name: name, options: runOptions)
+            vmRunSession = try await tart.run(
+                name: name,
+                options: runOptions,
+                deferSoftnetBlock: provisionerConfig.type == .github
+                    && vm.run.softnetBlock != nil
+            )
         } catch {
             logger.error("tart run failed for \(name): \(String(describing: error))")
             await shutdownCoordinator.cleanup(reason: "tart run failed")
             throw error
         }
+        let vmRunHandle = vmRunSession.handle
         await shutdownCoordinator.setRunHandle(vmRunHandle)
         let startupOutcome = await waitForVMReady(
             name: name,
@@ -157,13 +163,31 @@ struct Runner: Sendable {
             await shutdownCoordinator.cleanup(reason: "VM startup failed")
             return
         }
+        let guestAgentReadiness: Tart.GuestAgentReadiness?
+        if vmRunSession.policyControl != nil {
+            do {
+                guestAgentReadiness = try await tart.verifyGuestAgent(name: name)
+            } catch {
+                logger.error(
+                    "Tart guest-agent preflight failed before runner registration: "
+                        + String(describing: error)
+                )
+                await shutdownCoordinator.cleanup(reason: "guest-agent preflight failed")
+                throw error
+            }
+        } else {
+            guestAgentReadiness = nil
+        }
         await logVMStatusAfterBoot(name: name)
         try await runProvisioning(
             name: name,
             vm: vm,
             ssh: ssh,
             runnerCacheInfo: runnerCacheInfo,
-            provisionerConfig: provisionerConfig
+            provisionerConfig: provisionerConfig,
+            policyControl: vmRunSession.policyControl,
+            deferredBlockTargets: vmRunSession.deferredBlockTargets,
+            guestAgentReadiness: guestAgentReadiness
         )
     }
 
@@ -172,7 +196,10 @@ struct Runner: Sendable {
         vm: Config.VM,
         ssh: SSHClient,
         runnerCacheInfo: RunnerCacheInfo?,
-        provisionerConfig: Config.Provisioner
+        provisionerConfig: Config.Provisioner,
+        policyControl: SoftnetPolicyControl?,
+        deferredBlockTargets: [String],
+        guestAgentReadiness: Tart.GuestAgentReadiness?
     ) async throws {
         if let preRun = config.preRun {
             logger.info("run preRun")
@@ -195,7 +222,7 @@ struct Runner: Sendable {
         }
         let healthCheckState = HealthCheckState()
         logger.debug("healthCheck task preparing (vm=\(name))")
-        let healthCheckTask = startHealthCheck(
+        var healthCheckTask = startHealthCheck(
             healthCheck: config.healthCheck ?? .standard,
             vmName: name,
             ssh: vm.ssh,
@@ -206,6 +233,7 @@ struct Runner: Sendable {
         func stopHealthCheck(_ task: Task<Void, Never>) async {
             logger.debug("healthCheck task cancel requested")
             task.cancel()
+            await task.value
             await control.clearHealthCheckTask()
         }
         do {
@@ -248,13 +276,59 @@ struct Runner: Sendable {
                         runnerVersion: runnerVersion
                     )
                 }
-                let commands = provisioner.script(
+                let plan = provisioner.script(
                     config: githubConfig,
                     runnerToken: token,
                     runnerVersion: runnerVersion,
                     cacheDirectory: runnerCacheInfo?.name
                 )
-                let outcome = await runProvisionerCommands(commands, ssh: ssh, healthCheckState: healthCheckState)
+                var outcome = await runProvisionerCommands(
+                    plan.setupCommands,
+                    ssh: ssh,
+                    healthCheckState: healthCheckState
+                )
+                if case .completed = outcome {
+                    if policyControl == nil {
+                        outcome = await runProvisionerCommands(
+                            [plan.runnerCommand],
+                            ssh: ssh,
+                            healthCheckState: healthCheckState
+                        )
+                    } else {
+                        guard let policyControl,
+                              let guestAgentReadiness,
+                              !deferredBlockTargets.isEmpty else {
+                            throw SoftnetPolicyControlError.childDescriptorUnavailable
+                        }
+                        await stopHealthCheck(healthCheckTask)
+                        logger.info(
+                            "cut over GitHub runner control from SSH to Tart guest agent"
+                        )
+                        do {
+                            let runnerHandle = try await tart.startIsolatedCommand(
+                                readiness: guestAgentReadiness,
+                                command: plan.runnerCommand,
+                                policyControl: policyControl,
+                                blockTargets: deferredBlockTargets
+                            )
+                            let isolatedHealthCheckState = HealthCheckState()
+                            healthCheckTask = startTartExecHealthCheck(
+                                healthCheck: config.healthCheck ?? .standard,
+                                vmName: name,
+                                control: control,
+                                state: isolatedHealthCheckState
+                            )
+                            await control.setHealthCheckTask(healthCheckTask)
+                            outcome = await runProvisionerHandle(
+                                runnerHandle,
+                                command: plan.runnerCommand,
+                                healthCheckState: isolatedHealthCheckState
+                            )
+                        } catch {
+                            outcome = .failed(error)
+                        }
+                    }
+                }
                 switch outcome {
                 case .completed:
                     logger.warning("github provisioner completed; runner exited, restarting VM")
@@ -703,6 +777,108 @@ struct Runner: Sendable {
         }
     }
 
+    private func startTartExecHealthCheck(
+        healthCheck: Config.HealthCheck,
+        vmName: String,
+        control: RunnerControl,
+        state: HealthCheckState
+    ) -> Task<Void, Never> {
+        logger.info("isolated healthCheck starting in \(healthCheck.delay)s")
+        return Task {
+            if healthCheck.delay > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: nanos(from: healthCheck.delay))
+                } catch {
+                    self.logger.debug("isolated healthCheck delay sleep cancelled")
+                    return
+                }
+            }
+            guard !Task.isCancelled else {
+                self.logger.debug("isolated healthCheck cancelled before activation")
+                return
+            }
+            logger.info("isolated healthCheck active (interval: \(healthCheck.interval)s)")
+            let activationTime = Date()
+            var sawSuccess = false
+            let startupGrace = max(healthCheck.interval, 10)
+            let healthCheckLabel = commandSummary(healthCheck.command)
+            let healthCheckDescriptor = healthCheckLabel.isEmpty
+                ? "isolated healthCheck"
+                : "isolated healthCheck (\(healthCheckLabel))"
+            logger.info("isolated healthCheck command: \(healthCheck.command)")
+            while !Task.isCancelled {
+                self.logger.debug("isolated healthCheck tick (vm=\(vmName))")
+                do {
+                    let status = try await tart.status(name: vmName)
+                    self.logger.debug("isolated healthCheck VM status: \(statusLabel(status))")
+                    if status != .running {
+                        let message: String
+                        switch status {
+                        case .missing:
+                            message = "vm missing"
+                        case .stopped:
+                            message = "vm stopped"
+                        case .running:
+                            message = "vm running"
+                        }
+                        logger.warning(
+                            "VM \(vmName) not running (\(message)), marking isolated healthCheck failed"
+                        )
+                        await state.markFailed(message: message)
+                        await control.terminateProvisioning()
+                        return
+                    }
+                } catch {
+                    logger.warning(
+                        "Failed to check VM \(vmName) running state: \(String(describing: error))"
+                    )
+                }
+                do {
+                    let probeCommand = wrapHealthCheckCommand(healthCheck.command)
+                    let result = try await tart.exec(name: vmName, command: probeCommand)
+                    let exitCode = parseHealthCheckExitCode(output: result.stdout) ?? 1
+                    self.logger.debug("isolated healthCheck exit code \(exitCode)")
+                    if exitCode == 0 {
+                        sawSuccess = true
+                        self.logger.debug("isolated healthCheck success")
+                    } else {
+                        let filteredOutput = stripHealthCheckMarker(output: result.stdout)
+                        let outputLabel = healthCheckLabel.isEmpty
+                            ? "isolated healthCheck output"
+                            : "isolated healthCheck output (\(healthCheckLabel))"
+                        logIfNonEmpty(label: outputLabel, text: filteredOutput)
+                        let message = "exit code \(exitCode)"
+                        let inStartupGrace = !sawSuccess
+                            && Date().timeIntervalSince(activationTime) < startupGrace
+                        if inStartupGrace {
+                            logger.warning(
+                                "\(healthCheckDescriptor) failed with \(message) during startup grace, retrying"
+                            )
+                        } else {
+                            logger.warning(
+                                "\(healthCheckDescriptor) failed with \(message), marking healthCheck failed"
+                            )
+                            await state.markFailed(message: message)
+                            await control.terminateProvisioning()
+                            return
+                        }
+                    }
+                } catch {
+                    logger.warning(
+                        "\(healthCheckDescriptor) error (will retry): \(String(describing: error))"
+                    )
+                }
+                do {
+                    try await Task.sleep(nanoseconds: nanos(from: healthCheck.interval))
+                } catch {
+                    self.logger.debug("isolated healthCheck interval sleep cancelled")
+                    return
+                }
+            }
+            self.logger.debug("isolated healthCheck cancelled (vm=\(vmName))")
+        }
+    }
+
     private enum ProvisionerOutcome {
         case completed(ProcessResult)
         case failed(Error)
@@ -788,6 +964,50 @@ struct Runner: Sendable {
                 }
                 return .failed(logRedactor.redact(error))
             }
+        }
+    }
+
+    private func runProvisionerHandle(
+        _ handle: ProcessHandle,
+        command: String,
+        healthCheckState: HealthCheckState
+    ) async -> ProvisionerSequenceOutcome {
+        let logRedactor = ProvisionerLogRedactor(command: command)
+        let redactedCommand = logRedactor.redact(command)
+        logScript(redactedCommand)
+        let commandLabel = commandSummary(redactedCommand)
+        let labeledCommand = commandLabel.isEmpty
+            ? "isolated provisioner command"
+            : "isolated provisioner command (\(commandLabel))"
+        logger.debug("\(labeledCommand) started; awaiting completion or healthCheck failure")
+        await control.setProvisioningHandle(handle)
+        let outcome = await awaitProvisionerCommand(
+            handle: handle,
+            healthCheckState: healthCheckState
+        )
+        await control.clearProvisioningHandle(handle)
+        switch outcome {
+        case let .completed(result):
+            let stdoutLabel = commandLabel.isEmpty ? "stdout" : "stdout (\(commandLabel))"
+            let stderrLabel = commandLabel.isEmpty ? "stderr" : "stderr (\(commandLabel))"
+            logIfNonEmpty(label: stdoutLabel, text: logRedactor.redact(result.stdout))
+            logIfNonEmpty(label: stderrLabel, text: logRedactor.redact(result.stderr))
+            logger.info("\(labeledCommand) completed with exit code \(result.exitCode)")
+            if isRunnerCommand(command) {
+                logger.warning("github runner exited with code \(result.exitCode)")
+            }
+            return .completed
+        case let .failed(error):
+            return .failed(logRedactor.redact(error))
+        case let .healthCheckFailed(message):
+            logger.warning(
+                "isolated healthCheck failed; terminating provisioner command wait: \(message)"
+            )
+            await control.terminateProvisioning()
+            Task.detached {
+                _ = try? await handle.waitAsync()
+            }
+            return .healthCheckFailed(message)
         }
     }
 

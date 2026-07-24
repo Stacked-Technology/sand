@@ -130,6 +130,55 @@ final class ConfigValidatorTests: XCTestCase {
               config:
                 run: "echo ok"
         """)
+        let delimiterBlockURL = try writeTempFile(contents: """
+        runners:
+          - name: runner-1
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+              run:
+                network: softnet
+                softnetBlock: ", ,"
+            provisioner:
+              type: script
+              config:
+                run: "echo ok"
+        """)
+        let invalidBlockURL = try writeTempFile(contents: """
+        runners:
+          - name: runner-1
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+              run:
+                network: softnet
+                softnetBlock: "10.0.0.0/99"
+            provisioner:
+              type: script
+              config:
+                run: "echo ok"
+        """)
+        let oversizedTargets = Array(
+            repeating: "@host",
+            count: SoftnetPolicyTargets.maximumTargets + 1
+        ).joined(separator: ",")
+        let oversizedBlockURL = try writeTempFile(contents: """
+        runners:
+          - name: runner-1
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+              run:
+                network: softnet
+                softnetBlock: "\(oversizedTargets)"
+            provisioner:
+              type: script
+              config:
+                run: "echo ok"
+        """)
 
         let nonSoftnetIssues = ConfigValidator().validate(
             try Config.load(path: nonSoftnetURL.path)
@@ -143,7 +192,28 @@ final class ConfigValidatorTests: XCTestCase {
         )
         XCTAssertTrue(emptyBlockIssues.contains(ConfigValidationIssue(
             severity: .error,
-            message: "runner runner-1: vm.run.softnetBlock must not be empty when provided."
+            message: "runner runner-1: vm.run.softnetBlock must contain at least one target when provided."
+        )))
+        let delimiterBlockIssues = ConfigValidator().validate(
+            try Config.load(path: delimiterBlockURL.path)
+        )
+        XCTAssertTrue(delimiterBlockIssues.contains(ConfigValidationIssue(
+            severity: .error,
+            message: "runner runner-1: vm.run.softnetBlock must contain at least one target when provided."
+        )))
+        let invalidBlockIssues = ConfigValidator().validate(
+            try Config.load(path: invalidBlockURL.path)
+        )
+        XCTAssertTrue(invalidBlockIssues.contains(ConfigValidationIssue(
+            severity: .error,
+            message: "runner runner-1: vm.run.softnetBlock targets must be IPv4 CIDRs or @host."
+        )))
+        let oversizedBlockIssues = ConfigValidator().validate(
+            try Config.load(path: oversizedBlockURL.path)
+        )
+        XCTAssertTrue(oversizedBlockIssues.contains(ConfigValidationIssue(
+            severity: .error,
+            message: "runner runner-1: vm.run.softnetBlock may contain at most 4096 targets."
         )))
     }
 
