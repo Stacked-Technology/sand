@@ -297,6 +297,12 @@ protocol ProcessRunning: Sendable {
         arguments: [String],
         maximumCaptureBytes: Int
     ) throws -> ProcessHandle
+    func startBounded(
+        executable: String,
+        arguments: [String],
+        maximumCaptureBytes: Int,
+        standardInputDescriptor: Int32
+    ) throws -> ProcessHandle
 }
 
 extension ProcessRunning {
@@ -306,6 +312,19 @@ extension ProcessRunning {
         maximumCaptureBytes _: Int
     ) throws -> ProcessHandle {
         try start(executable: executable, arguments: arguments)
+    }
+
+    func startBounded(
+        executable: String,
+        arguments: [String],
+        maximumCaptureBytes: Int,
+        standardInputDescriptor _: Int32
+    ) throws -> ProcessHandle {
+        try startBounded(
+            executable: executable,
+            arguments: arguments,
+            maximumCaptureBytes: maximumCaptureBytes
+        )
     }
 }
 
@@ -348,10 +367,25 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
         )
     }
 
+    func startBounded(
+        executable: String,
+        arguments: [String],
+        maximumCaptureBytes: Int,
+        standardInputDescriptor: Int32
+    ) throws -> ProcessHandle {
+        try start(
+            executable: executable,
+            arguments: arguments,
+            maximumCaptureBytes: maximumCaptureBytes,
+            standardInputDescriptor: standardInputDescriptor
+        )
+    }
+
     private func start(
         executable: String,
         arguments: [String],
-        maximumCaptureBytes: Int
+        maximumCaptureBytes: Int,
+        standardInputDescriptor: Int32? = nil
     ) throws -> ProcessHandle {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -359,6 +393,12 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
         process.arguments = command
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        if let standardInputDescriptor {
+            process.standardInput = FileHandle(
+                fileDescriptor: standardInputDescriptor,
+                closeOnDealloc: false
+            )
+        }
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         try process.run()

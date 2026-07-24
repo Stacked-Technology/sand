@@ -33,6 +33,65 @@ final class MockProcessRunner: ProcessRunning, @unchecked Sendable {
     }
 }
 
+private final class OrderedProcessRunner: ProcessRunning, @unchecked Sendable {
+    let events: LockedEventLog
+
+    init(events: LockedEventLog) {
+        self.events = events
+    }
+
+    func run(executable: String, arguments: [String], wait: Bool) async throws -> ProcessResult? {
+        XCTFail("Unexpected run call")
+        return nil
+    }
+
+    func start(executable: String, arguments: [String]) throws -> ProcessHandle {
+        events.append("start:\(([executable] + arguments).joined(separator: " "))")
+        return ProcessHandle(
+            waitAsync: {
+                ProcessResult(stdout: "", stderr: "", exitCode: 0)
+            },
+            terminate: {}
+        )
+    }
+}
+
+private actor MockSoftnetPolicyControl: SoftnetPolicyControlling {
+    let events: LockedEventLog
+    let error: Error?
+
+    init(events: LockedEventLog, error: Error? = nil) {
+        self.events = events
+        self.error = error
+    }
+
+    func replacePolicy(allow: [String], block: [String]) async throws {
+        events.append("policy:allow=\(allow.joined(separator: ","));block=\(block.joined(separator: ","))")
+        if let error {
+            throw error
+        }
+    }
+}
+
+private final class LockedEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+
+    func append(_ event: String) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return events
+    }
+}
+
 func makeTart(_ runner: ProcessRunning) -> Tart {
     Tart(processRunner: runner, logger: Logger(label: "tart.test", minimumLevel: .info))
 }
@@ -75,6 +134,149 @@ final class TartTests: XCTestCase {
             ],
             wait: false
         ))
+    }
+
+    func testDeferredSoftnetBlockUsesControlDescriptorInsteadOfStaticPolicy() async throws {
+        let runner = MockProcessRunner()
+        let tart = makeTart(runner)
+        let options = Tart.RunOptions(
+            directoryMounts: [],
+            noAudio: true,
+            noGraphics: true,
+            noClipboard: true,
+            network: .softnet,
+            softnetBlock: "@host"
+        )
+
+        let session = try await tart.run(
+            name: "ephemeral",
+            options: options,
+            deferSoftnetBlock: true
+        )
+
+        let arguments = try XCTUnwrap(runner.startCalls.first?.arguments)
+        XCTAssertTrue(arguments.contains("--net-softnet-control-fd"))
+        XCTAssertFalse(arguments.contains("--net-softnet-block"))
+        let controlFlagIndex = try XCTUnwrap(
+            arguments.firstIndex(of: "--net-softnet-control-fd")
+        )
+        XCTAssertEqual(arguments[controlFlagIndex + 1], "3")
+        XCTAssertEqual(runner.startCalls.first?.executable, "/bin/sh")
+        XCTAssertEqual(session.deferredBlockTargets, ["@host"])
+        XCTAssertNotNil(session.policyControl)
+    }
+
+    func testDeferredSoftnetBlockRejectsDelimiterOnlyPolicy() async throws {
+        let runner = MockProcessRunner()
+        let tart = makeTart(runner)
+        let options = Tart.RunOptions(
+            directoryMounts: [],
+            noAudio: true,
+            noGraphics: true,
+            noClipboard: true,
+            network: .softnet,
+            softnetBlock: ", ,"
+        )
+
+        do {
+            _ = try await tart.run(
+                name: "ephemeral",
+                options: options,
+                deferSoftnetBlock: true
+            )
+            XCTFail("Expected invalid deferred policy to fail closed")
+        } catch TartError.invalidSoftnetBlock {
+            XCTAssertTrue(runner.startCalls.isEmpty)
+        }
+    }
+
+    func testDeferredSoftnetControlChannelWorksThroughRealProcessLaunch() async throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sand-fake-tart-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+        let fakeTart = temporaryDirectory.appendingPathComponent("tart")
+        let script = """
+        #!/bin/sh
+        IFS= read -r request <&3
+        printf '%s\\n' '{"jsonrpc":"2.0","id":"sand-network-cutover","result":{"allow":[],"block":["@host"],"ruleCount":1}}' >&3
+        """
+        try Data(script.utf8).write(to: fakeTart)
+        XCTAssertEqual(chmod(fakeTart.path, 0o700), 0)
+        let tart = Tart(
+            processRunner: SystemProcessRunner(),
+            logger: Logger(label: "tart.integration.test", minimumLevel: .info),
+            executable: fakeTart.path
+        )
+        let options = Tart.RunOptions(
+            directoryMounts: [],
+            noAudio: true,
+            noGraphics: true,
+            noClipboard: true,
+            network: .softnet,
+            softnetBlock: "@host"
+        )
+
+        let session = try await tart.run(
+            name: "ephemeral",
+            options: options,
+            deferSoftnetBlock: true
+        )
+        let policyControl = try XCTUnwrap(session.policyControl)
+        try await policyControl.replacePolicy(allow: [], block: ["@host"])
+        let result = try await session.handle.waitAsync()
+
+        XCTAssertEqual(result.exitCode, 0)
+    }
+
+    func testIsolatedCommandAppliesPolicyAfterGuestAgentPreflightAndBeforeRunnerStart() async throws {
+        let events = LockedEventLog()
+        let tart = makeTart(OrderedProcessRunner(events: events))
+        let policy = MockSoftnetPolicyControl(events: events)
+        let readiness = try await tart.verifyGuestAgent(name: "ephemeral")
+
+        _ = try await tart.startIsolatedCommand(
+            readiness: readiness,
+            command: "~/actions-runner/run.sh",
+            policyControl: policy,
+            blockTargets: ["@host"]
+        )
+
+        XCTAssertEqual(events.snapshot(), [
+            "start:tart exec ephemeral /bin/bash -lc /usr/bin/true",
+            "policy:allow=;block=@host",
+            "start:tart exec ephemeral /bin/bash -lc ~/actions-runner/run.sh"
+        ])
+    }
+
+    func testIsolatedCommandDoesNotStartRunnerWhenPolicyCutoverFails() async throws {
+        let events = LockedEventLog()
+        let tart = makeTart(OrderedProcessRunner(events: events))
+        let policy = MockSoftnetPolicyControl(
+            events: events,
+            error: SoftnetPolicyControlError.invalidResponse
+        )
+        let readiness = try await tart.verifyGuestAgent(name: "ephemeral")
+
+        do {
+            _ = try await tart.startIsolatedCommand(
+                readiness: readiness,
+                command: "~/actions-runner/run.sh",
+                policyControl: policy,
+                blockTargets: ["@host"]
+            )
+            XCTFail("Expected policy cutover failure")
+        } catch SoftnetPolicyControlError.invalidResponse {
+            XCTAssertEqual(events.snapshot(), [
+                "start:tart exec ephemeral /bin/bash -lc /usr/bin/true",
+                "policy:allow=;block=@host"
+            ])
+        }
     }
 
     func testSetArgs() async throws {

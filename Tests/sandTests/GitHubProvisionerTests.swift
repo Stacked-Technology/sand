@@ -3,6 +3,28 @@ import XCTest
 @testable import sand
 
 final class GitHubProvisionerTests: XCTestCase {
+    func testRunnerCommandIsSeparatedFromTrustedSetupCommands() {
+        let provisioner = GitHubProvisioner()
+        let config = GitHubProvisionerConfig(
+            appId: 1,
+            organization: "org",
+            repository: nil,
+            privateKeyPath: "/tmp/key.pem",
+            runnerName: "runner-1",
+            extraLabels: nil
+        )
+
+        let plan = provisioner.script(
+            config: config,
+            runnerToken: "token",
+            runnerVersion: "2.999.0"
+        )
+
+        XCTAssertEqual(plan.runnerCommand, "~/actions-runner/run.sh")
+        XCTAssertFalse(plan.setupCommands.contains(plan.runnerCommand))
+        XCTAssertTrue(plan.setupCommands.contains { $0.contains("config.sh") })
+    }
+
     func testScriptWithExtraLabels() {
         let provisioner = GitHubProvisioner()
         let config = GitHubProvisionerConfig(
@@ -19,7 +41,7 @@ final class GitHubProvisionerTests: XCTestCase {
             runnerToken: "token",
             runnerVersion: runnerVersion
         )
-        let joined = script.joined(separator: "\n")
+        let joined = script.allCommands.joined(separator: "\n")
         XCTAssertTrue(joined.contains("--labels sand,fast,arm64"))
         XCTAssertTrue(joined.contains("--url https://github.com/org/repo"))
         XCTAssertTrue(joined.contains("actions/runner/releases/download"))
@@ -43,7 +65,7 @@ final class GitHubProvisionerTests: XCTestCase {
             runnerToken: "token",
             runnerVersion: runnerVersion
         )
-        let joined = script.joined(separator: "\n")
+        let joined = script.allCommands.joined(separator: "\n")
         XCTAssertTrue(joined.contains("--labels sand"))
         XCTAssertTrue(joined.contains("--url https://github.com/org"))
         XCTAssertTrue(joined.contains("actions-runner-${runner_os}-${runner_arch}"))
@@ -68,7 +90,7 @@ final class GitHubProvisionerTests: XCTestCase {
             runnerToken: "token",
             runnerVersion: "2.999.0"
         )
-        let joined = script.joined(separator: "\n")
+        let joined = script.allCommands.joined(separator: "\n")
         XCTAssertTrue(joined.contains("--runnergroup 'Mac Runner'\\''s'"))
     }
 
@@ -89,7 +111,7 @@ final class GitHubProvisionerTests: XCTestCase {
             runnerVersion: runnerVersion,
             cacheDirectory: "sand-cache"
         )
-        let joined = script.joined(separator: "\n")
+        let joined = script.allCommands.joined(separator: "\n")
         XCTAssertTrue(joined.contains("runner cache hit"))
         XCTAssertTrue(joined.contains("runner cache miss"))
         XCTAssertTrue(joined.contains("runner cache unavailable"))
@@ -116,7 +138,7 @@ final class GitHubProvisionerTests: XCTestCase {
             runnerVersion: runnerVersion,
             cacheDirectory: cacheDirectory
         )
-        let joined = script.joined(separator: "\n")
+        let joined = script.allCommands.joined(separator: "\n")
         XCTAssertTrue(joined.contains("cache_dir_name=\"\(cacheDirectory)\""))
         XCTAssertTrue(joined.contains("version=\"\(runnerVersion)\""))
     }

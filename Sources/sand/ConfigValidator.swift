@@ -101,10 +101,21 @@ final class ConfigValidator {
                     message: "vm.run.softnetBlock requires vm.run.network: softnet."
                 ))
             }
-            if softnetBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let targets = SoftnetPolicyTargets.parse(softnetBlock)
+            if targets.isEmpty {
                 issues.append(.init(
                     severity: .error,
-                    message: "vm.run.softnetBlock must not be empty when provided."
+                    message: "vm.run.softnetBlock must contain at least one target when provided."
+                ))
+            } else if SoftnetPolicyTargets.normalized(targets) == nil {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.softnetBlock targets must be IPv4 CIDRs or @host."
+                ))
+            } else if targets.count > SoftnetPolicyTargets.maximumTargets {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.softnetBlock may contain at most 4096 targets."
                 ))
             }
         }

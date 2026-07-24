@@ -5,7 +5,8 @@ Self-hosted macOS CI Runners powered by Tart - Apple's Virtualization framework.
 ## Requirements
 
 - macOS 15+ running on Apple Silicon machines.
-- Tart installed and available in PATH
+- Tart installed and available in PATH. GitHub runners that use `softnetBlock`
+  require Tart 2.34.0 or newer and a VM image with Tart Guest Agent.
 - sand uses tart. it helps understanding tart before using sand (https://tart.run/quick-start/)
 - Softnet installed and configured with root SUID ownership or passwordless sudo when using `vm.run.network: softnet`
 
@@ -145,7 +146,9 @@ runners:
       delay: 60
 ```
 
-Set `vm.run.network` to `softnet` to pass Tart's `--net-softnet` option. Softnet restricts private-network access while preserving outbound access to globally routable addresses, but its default policy permits the VM gateway. Set `vm.run.softnetBlock` to `"@host"` to pass Tart's `--net-softnet-block @host` policy and block that host/gateway exception. `softnetBlock` is rejected unless the selected network is `softnet`. Softnet must be installed separately and requires root SUID ownership or passwordless sudo; Sand validates both the binary and privilege setup before starting a runner.
+Set `vm.run.network` to `softnet` to pass Tart's `--net-softnet` option. Softnet restricts private-network access while preserving outbound access to globally routable addresses, but its default policy permits the VM gateway. Set `vm.run.softnetBlock` to `"@host"` to block that host/gateway exception. For GitHub provisioners, Sand permits host SSH only during trusted runner setup, verifies the Tart Guest Agent control channel, atomically applies the Softnet block, and then starts and monitors `run.sh` through `tart exec`. A GitHub Actions job therefore cannot start before Softnet acknowledges the host block, and no SSH connection is needed after cutover. Custom script provisioners retain the boot-time static block.
+
+`softnetBlock` is rejected unless the selected network is `softnet`. The isolated GitHub lifecycle requires Tart 2.34.0 or newer, Softnet 0.21.0 or newer, and a guest image with Tart Guest Agent. Softnet must be installed separately and requires root SUID ownership or passwordless sudo; Sand validates both the binary and privilege setup before starting a runner.
 
 Set `provisioner.config.runnerGroup` to register an organization runner directly in an existing GitHub runner group. Omit it to use GitHub's default runner group. Runner groups require organization-level registration, so `repository` must also be omitted when `runnerGroup` is set.
 

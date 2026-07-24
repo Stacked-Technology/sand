@@ -2,6 +2,7 @@ import Foundation
 
 enum TartError: Error {
     case emptyIP
+    case invalidSoftnetBlock
 }
 
 struct Tart: Sendable {
@@ -50,6 +51,16 @@ struct Tart: Sendable {
         )
     }
 
+    struct RunSession {
+        let handle: ProcessHandle
+        let policyControl: SoftnetPolicyControl?
+        let deferredBlockTargets: [String]
+    }
+
+    struct GuestAgentReadiness: Sendable {
+        fileprivate let vmName: String
+    }
+
     struct Display {
         let width: Int
         let height: Int
@@ -63,10 +74,16 @@ struct Tart: Sendable {
 
     let processRunner: ProcessRunning
     let logger: Logger
+    let executable: String
 
-    init(processRunner: ProcessRunning, logger: Logger) {
+    init(
+        processRunner: ProcessRunning,
+        logger: Logger,
+        executable: String = "tart"
+    ) {
         self.processRunner = processRunner
         self.logger = logger
+        self.executable = executable
     }
 
     func prepare(source: String) async throws {
@@ -116,8 +133,14 @@ struct Tart: Sendable {
         _ = try await run(arguments: arguments, wait: true)
     }
 
-    func run(name: String, options: RunOptions = .default) async throws -> ProcessHandle {
+    func run(
+        name: String,
+        options: RunOptions = .default,
+        deferSoftnetBlock: Bool = false
+    ) async throws -> RunSession {
         var arguments = ["run", name]
+        var policyControl: SoftnetPolicyControl?
+        var deferredBlockTargets: [String] = []
         if options.noGraphics {
             arguments.append("--no-graphics")
         }
@@ -130,7 +153,22 @@ struct Tart: Sendable {
         if options.network == .softnet {
             arguments.append("--net-softnet")
             if let softnetBlock = options.softnetBlock {
-                arguments.append(contentsOf: ["--net-softnet-block", softnetBlock])
+                if deferSoftnetBlock {
+                    deferredBlockTargets = SoftnetPolicyTargets.parse(softnetBlock)
+                    guard !deferredBlockTargets.isEmpty,
+                          deferredBlockTargets.count <= SoftnetPolicyTargets.maximumTargets,
+                          SoftnetPolicyTargets.normalized(deferredBlockTargets) != nil else {
+                        throw TartError.invalidSoftnetBlock
+                    }
+                    let control = try SoftnetPolicyControl()
+                    policyControl = control
+                    arguments.append(contentsOf: [
+                        "--net-softnet-control-fd",
+                        "3"
+                    ])
+                } else {
+                    arguments.append(contentsOf: ["--net-softnet-block", softnetBlock])
+                }
             }
         }
         for mount in options.directoryMounts {
@@ -138,11 +176,74 @@ struct Tart: Sendable {
             arguments.append(mount.runArgument)
         }
         logger.debug("tart \(arguments.joined(separator: " "))")
+        do {
+            let handle: ProcessHandle
+            if let policyControl {
+                // Foundation's Process closes arbitrary inherited descriptors.
+                // It does preserve standard input, so carry the duplex socket as
+                // fd 0 and remap it to fd 3 before Tart validates the control fd.
+                handle = try processRunner.startBounded(
+                    executable: "/bin/sh",
+                    arguments: [
+                        "-c",
+                        "exec 3<&0; exec 0</dev/null; exec \"$0\" \"$@\"",
+                        executable
+                    ] + arguments,
+                    maximumCaptureBytes: 65_536,
+                    standardInputDescriptor: policyControl.inheritedDescriptor
+                )
+            } else {
+                handle = try processRunner.startBounded(
+                    executable: executable,
+                    arguments: arguments,
+                    maximumCaptureBytes: 65_536
+                )
+            }
+            await policyControl?.childDidLaunch()
+            return RunSession(
+                handle: handle,
+                policyControl: policyControl,
+                deferredBlockTargets: deferredBlockTargets
+            )
+        } catch {
+            await policyControl?.close()
+            throw error
+        }
+    }
+
+    func exec(
+        name: String,
+        command: String,
+        timeout: Duration = .seconds(30)
+    ) async throws -> ProcessResult {
+        let handle = try startExec(name: name, command: command)
+        return try await waitForProcess(handle, timeout: timeout)
+    }
+
+    func startExec(name: String, command: String) throws -> ProcessHandle {
+        logger.debug("tart exec \(name) \(command)")
         return try processRunner.startBounded(
-            executable: "tart",
-            arguments: arguments,
-            maximumCaptureBytes: 65_536
+            executable: executable,
+            arguments: ["exec", name, "/bin/bash", "-lc", command],
+            maximumCaptureBytes: 1_024 * 1_024
         )
+    }
+
+    func verifyGuestAgent(name: String) async throws -> GuestAgentReadiness {
+        logger.info("verify Tart guest-agent control channel before runner registration")
+        _ = try await exec(name: name, command: "/usr/bin/true")
+        return GuestAgentReadiness(vmName: name)
+    }
+
+    func startIsolatedCommand(
+        readiness: GuestAgentReadiness,
+        command: String,
+        policyControl: any SoftnetPolicyControlling,
+        blockTargets: [String]
+    ) async throws -> ProcessHandle {
+        try await policyControl.replacePolicy(allow: [], block: blockTargets)
+        logger.info("Softnet network isolation applied")
+        return try startExec(name: readiness.vmName, command: command)
     }
 
     func ip(name: String, wait: Int) async throws -> String {
@@ -236,13 +337,13 @@ struct Tart: Sendable {
 
     private func run(arguments: [String], wait: Bool) async throws -> ProcessResult? {
         logger.debug("tart \(arguments.joined(separator: " "))")
-        return try await processRunner.run(executable: "tart", arguments: arguments, wait: wait)
+        return try await processRunner.run(executable: executable, arguments: arguments, wait: wait)
     }
 
     private func run(arguments: [String], timeout: Duration) async throws -> ProcessResult {
         logger.debug("tart \(arguments.joined(separator: " "))")
         let handle = try processRunner.startBounded(
-            executable: "tart",
+            executable: executable,
             arguments: arguments,
             maximumCaptureBytes: 1_024 * 1_024
         )
