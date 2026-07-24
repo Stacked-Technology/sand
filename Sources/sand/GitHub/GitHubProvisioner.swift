@@ -13,6 +13,7 @@ struct GitHubProvisionerConfig: Decodable, Sendable {
     let repository: String?
     let privateKeyPath: String
     let runnerName: String
+    let ephemeral: Bool
     let extraLabels: [String]?
     let runnerGroup: String?
 
@@ -22,6 +23,7 @@ struct GitHubProvisionerConfig: Decodable, Sendable {
         repository: String?,
         privateKeyPath: String,
         runnerName: String,
+        ephemeral: Bool = true,
         extraLabels: [String]?,
         runnerGroup: String? = nil
     ) {
@@ -30,8 +32,32 @@ struct GitHubProvisionerConfig: Decodable, Sendable {
         self.repository = repository
         self.privateKeyPath = privateKeyPath
         self.runnerName = runnerName
+        self.ephemeral = ephemeral
         self.extraLabels = extraLabels
         self.runnerGroup = runnerGroup
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.appId = try container.decode(Int.self, forKey: .appId)
+        self.organization = try container.decode(String.self, forKey: .organization)
+        self.repository = try container.decodeIfPresent(String.self, forKey: .repository)
+        self.privateKeyPath = try container.decode(String.self, forKey: .privateKeyPath)
+        self.runnerName = try container.decode(String.self, forKey: .runnerName)
+        self.ephemeral = try container.decodeIfPresent(Bool.self, forKey: .ephemeral) ?? true
+        self.extraLabels = try container.decodeIfPresent([String].self, forKey: .extraLabels)
+        self.runnerGroup = try container.decodeIfPresent(String.self, forKey: .runnerGroup)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case appId
+        case organization
+        case repository
+        case privateKeyPath
+        case runnerName
+        case ephemeral
+        case extraLabels
+        case runnerGroup
     }
 }
 
@@ -48,6 +74,7 @@ struct GitHubProvisioner: Sendable {
         let url = runnerURL(organization: config.organization, repository: config.repository)
         let cacheScript = runnerCacheScript(cacheDirectory: cacheDirectory)
         let runnerGroupArgument = config.runnerGroup.map { " --runnergroup \(shellQuote($0))" } ?? ""
+        let ephemeralFlag = config.ephemeral ? " --ephemeral" : ""
         return GitHubProvisioningPlan(
             setupCommands: [
                 """
@@ -59,7 +86,7 @@ echo $download_url
                 "rm -rf ~/actions-runner && mkdir ~/actions-runner",
                 "tar xzf ./actions-runner.tar.gz -C ~/actions-runner",
                 "echo \"Runner downloaded and extracted\"",
-                "~/actions-runner/config.sh --url \(url) --name \(config.runnerName) --token \(runnerToken) --ephemeral --unattended --replace --labels \(labels)\(runnerGroupArgument)",
+                "~/actions-runner/config.sh --url \(url) --name \(config.runnerName) --token \(runnerToken)\(ephemeralFlag) --unattended --replace --labels \(labels)\(runnerGroupArgument)",
                 "echo \"Runner script downloaded, starting ~/actions-runner/run.sh\""
             ],
             runnerCommand: "~/actions-runner/run.sh"

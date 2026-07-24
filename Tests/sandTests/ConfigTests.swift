@@ -42,6 +42,7 @@ final class ConfigTests: XCTestCase {
                 privateKeyPath: ~/key.pem
                 runnerName: runner-1
                 extraLabels: [fast, arm64]
+                ephemeral: false
                 runnerGroup: mac-runners
             preRun: |
               echo "pre-run"
@@ -80,6 +81,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runners.first?.provisioner.github?.organization, "acme")
         XCTAssertEqual(config.runners.first?.provisioner.github?.repository, "repo")
         XCTAssertEqual(config.runners.first?.provisioner.github?.extraLabels ?? [], ["fast", "arm64"])
+        XCTAssertEqual(config.runners.first?.provisioner.github?.ephemeral, false)
         XCTAssertEqual(config.runners.first?.provisioner.github?.runnerGroup, "mac-runners")
         XCTAssertTrue(config.runners.first?.provisioner.github?.privateKeyPath.hasPrefix(home) ?? false)
         XCTAssertTrue(config.runners.first?.preRun?.contains("pre-run") ?? false)

@@ -74,6 +74,47 @@ final class GitHubProvisionerTests: XCTestCase {
         XCTAssertFalse(joined.contains("--runnergroup"))
     }
 
+    func testScriptDefaultsToEphemeralRunner() {
+        let provisioner = GitHubProvisioner()
+        let config = GitHubProvisionerConfig(
+            appId: 1,
+            organization: "org",
+            repository: nil,
+            privateKeyPath: "/tmp/key.pem",
+            runnerName: "runner-1",
+            extraLabels: nil
+        )
+        let runnerVersion = "2.999.0"
+        let script = provisioner.script(
+            config: config,
+            runnerToken: "token",
+            runnerVersion: runnerVersion
+        )
+        let joined = script.allCommands.joined(separator: "\n")
+        XCTAssertTrue(joined.contains("--ephemeral"))
+    }
+
+    func testScriptCanCreatePersistentRunner() {
+        let provisioner = GitHubProvisioner()
+        let config = GitHubProvisionerConfig(
+            appId: 1,
+            organization: "org",
+            repository: nil,
+            privateKeyPath: "/tmp/key.pem",
+            runnerName: "runner-1",
+            ephemeral: false,
+            extraLabels: nil
+        )
+        let runnerVersion = "2.999.0"
+        let script = provisioner.script(
+            config: config,
+            runnerToken: "token",
+            runnerVersion: runnerVersion
+        )
+        let joined = script.allCommands.joined(separator: "\n")
+        XCTAssertFalse(joined.contains("--ephemeral"))
+    }
+
     func testScriptWithRunnerGroup() {
         let provisioner = GitHubProvisioner()
         let config = GitHubProvisionerConfig(
