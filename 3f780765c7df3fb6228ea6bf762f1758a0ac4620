@@ -1,0 +1,20 @@
+intent:
+  id: intent/2026-07-23/dynamic-softnet-runner-cutover
+change_type: fix
+scope: sand GitHub runner provisioning and network isolation
+summary: Keep SSH available only for trusted runner setup, then require an acknowledged Softnet host-block policy before starting untrusted GitHub jobs through Tart Guest Agent.
+decision: Use Tart's dynamic Softnet JSON-RPC control channel and guest-agent exec path for GitHub provisioners while preserving static softnetBlock behavior for script provisioners.
+constraints:
+  - Never start run.sh unless guest-agent preflight succeeds and Softnet acknowledges the exact normalized policy.
+  - Preserve token redaction, bounded process capture, cancellation supervision, and fail-closed cleanup.
+  - Keep host mounts, runner cache, graphics, audio, and clipboard disabled in the thcyay deployment.
+intent_priority: must
+code_locations:
+  - Sources/sand/Runner.swift
+  - Sources/sand/Tart.swift
+  - Sources/sand/SoftnetPolicyControl.swift
+  - Sources/sand/GitHub/GitHubProvisioner.swift
+requested_by: "@richardgetz"
+recorded_by: codex-cli
+agent: codex-cli
+model: gpt-5
