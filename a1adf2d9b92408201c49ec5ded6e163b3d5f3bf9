@@ -18,6 +18,8 @@ intent:
     - Sources/sand/Tart.swift
     - Tests/sandTests/TartTests.swift
     - README.md
+  superseded_by:
+    - intent/2026-07-23/dynamic-softnet-runner-cutover
   requested_by: "@richardgetz"
   recorded_by:
     agent: Codex
