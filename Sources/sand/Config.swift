@@ -442,6 +442,7 @@ extension Config.Provisioner {
                 repository: github.repository,
                 privateKeyPath: Config.expandPath(github.privateKeyPath),
                 runnerName: github.runnerName,
+                ephemeral: github.ephemeral,
                 extraLabels: github.extraLabels,
                 runnerGroup: github.runnerGroup
             )
