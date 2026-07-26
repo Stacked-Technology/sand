@@ -31,9 +31,16 @@ struct GitHubService: Sendable {
     let repository: String?
     let baseURL = URL(string: "https://api.github.com")!
 
-    func runnerRegistrationToken() async throws -> String {
+    func runnerRegistrationToken(
+        installationRepositories: [String]? = nil,
+        installationPermissions: [String: String]? = nil
+    ) async throws -> String {
         let installationId = try await installationID()
-        let accessToken = try await installationAccessToken(installationId: installationId)
+        let accessToken = try await installationAccessToken(
+            installationId: installationId,
+            repositories: installationRepositories,
+            permissions: installationPermissions
+        )
         let tokenResponse: RunnerTokenResponse = try await request(path: registrationTokenPath(), method: "POST", token: accessToken)
         return tokenResponse.token
     }
@@ -45,17 +52,48 @@ struct GitHubService: Sendable {
         return response.id
     }
 
-    private func installationAccessToken(installationId: Int) async throws -> String {
+    private func installationAccessToken(
+        installationId: Int,
+        repositories: [String]?,
+        permissions: [String: String]?
+    ) async throws -> String {
         let token = try auth.token(now: Date())
-        let response: AccessTokenResponse = try await request(path: "/app/installations/\(installationId)/access_tokens", method: "POST", token: token)
+        let body: Data?
+        if repositories != nil || permissions != nil {
+            var payload: [String: Any] = [:]
+            if let repositories {
+                payload["repositories"] = repositories
+            }
+            if let permissions {
+                payload["permissions"] = permissions
+            }
+            body = try JSONSerialization.data(withJSONObject: payload)
+        } else {
+            body = nil
+        }
+        let response: AccessTokenResponse = try await request(
+            path: "/app/installations/\(installationId)/access_tokens",
+            method: "POST",
+            token: token,
+            body: body
+        )
         return response.token
     }
 
-    private func request<T: Decodable>(path: String, method: String, token: String) async throws -> T {
+    private func request<T: Decodable>(
+        path: String,
+        method: String,
+        token: String,
+        body: Data? = nil
+    ) async throws -> T {
         let url = URL(string: path, relativeTo: baseURL)!
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.httpBody = body
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("sand", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)

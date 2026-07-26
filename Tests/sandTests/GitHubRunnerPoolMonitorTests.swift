@@ -231,3 +231,103 @@ final class GitHubRunnerPoolMonitorTests: XCTestCase {
         )
     }
 }
+
+private struct FailingPoolCheckMonitor: GitHubRunnerPoolMonitoring {
+    let status: Int
+
+    func snapshot() async throws -> GitHubRunnerPoolSnapshot {
+        throw GitHubRunnerPoolMonitorError.http(
+            status: status,
+            body: #"{"message":"Resource not accessible by integration"}"#,
+            retryAfter: nil
+        )
+    }
+}
+
+@available(macOS 15.0, *)
+final class PoolCheckTests: XCTestCase {
+    func testReadSnapshotCannotHideMissingRunnerWritePermission() async throws {
+        let snapshot = try await GitHubRunnerPoolMonitor(
+            auth: MockAuth(),
+            session: PoolMonitorSession(),
+            organization: "acme",
+            repositories: ["mobile"],
+            matchLabels: ["macos-pool", "release"],
+            runnerNames: ["runner-pool", "runner-pool-2"]
+        ).snapshot()
+        XCTAssertEqual(snapshot.queuedJobs, 1)
+
+        do {
+            try await PoolCheck.verifyRegistrationAccess(
+                poolName: "macos-pool",
+                registrationToken: {
+                    throw GitHubServiceError.httpError(
+                        status: 403,
+                        body: #"{"message":"Resource not accessible by integration"}"#
+                    )
+                }
+            )
+            XCTFail("expected runner write permission failure")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(
+                message.contains("Self-hosted runners: Read and write"),
+                message
+            )
+            XCTAssertTrue(message.contains("HTTP 403"), message)
+            XCTAssertFalse(message.contains("Resource not accessible"), message)
+        }
+    }
+
+    func testRegistrationPreflightExplainsUnselectedRepository() async {
+        do {
+            try await PoolCheck.verifyRegistrationAccess(
+                poolName: "macos-pool",
+                registrationToken: {
+                    throw GitHubServiceError.httpError(
+                        status: 422,
+                        body: #"{"message":"Repositories not accessible"}"#
+                    )
+                }
+            )
+            XCTFail("expected repository selection failure")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("select every configured repository"), message)
+            XCTAssertTrue(message.contains("HTTP 422"), message)
+            XCTAssertFalse(message.contains("Repositories not accessible"), message)
+        }
+    }
+
+    func testMissingActionsPermissionHasActionableFailure() async {
+        do {
+            _ = try await PoolCheck.verifySnapshot(
+                poolName: "macos-pool",
+                monitor: FailingPoolCheckMonitor(status: 403)
+            )
+            XCTFail("expected permission failure")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("Actions: Read-only"), message)
+            XCTAssertTrue(
+                message.contains("Self-hosted runners: Read and write"),
+                message
+            )
+            XCTAssertTrue(message.contains("HTTP 403"), message)
+        }
+    }
+
+    func testUnselectedRepositoryHasActionableFailure() async {
+        do {
+            _ = try await PoolCheck.verifySnapshot(
+                poolName: "macos-pool",
+                monitor: FailingPoolCheckMonitor(status: 422)
+            )
+            XCTFail("expected repository selection failure")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("select every configured repository"), message)
+            XCTAssertTrue(message.contains("HTTP 422"), message)
+        }
+    }
+}
