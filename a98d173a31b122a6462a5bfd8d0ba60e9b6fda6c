@@ -1,0 +1,25 @@
+intent:
+  id: intent/2026-07-26/demand-aware-isolated-runner-pools
+  change_type: feature
+  scope: macOS runner orchestration
+  summary: Add an explicit demand-aware pool that keeps one isolated runner warm and scales to a bounded maximum for matching queued jobs.
+  decision: Poll explicitly configured repositories and exact labels with a narrowly scoped GitHub App token; reconcile busy and queued demand into uniquely named ephemeral one-job VM slots while preserving one warm baseline.
+  constraints:
+    - Existing non-pool runner configurations retain their behavior.
+    - Every pooled VM accepts only one GitHub Actions job before destruction and recreation.
+    - Pooled VMs have no host mounts or shared cache, disable graphics audio and clipboard, and use Softnet with @host blocking.
+    - Pool capacity is explicitly bounded and defaults remain opt-in.
+    - GitHub monitoring tokens are narrowed to configured repositories and read-only Actions and organization-runner access.
+  intent_priority: must
+  code_locations:
+    - Sources/sand/RunnerPool.swift
+    - Sources/sand/GitHub/GitHubRunnerPoolMonitor.swift
+    - Sources/sand/Config.swift
+    - Sources/sand/ConfigValidator.swift
+    - Sources/sand/Sand.swift
+    - Sources/sand/Runner.swift
+    - Sources/sand/ProcessRunner.swift
+  requested_by: Rick
+  recorded_by:
+    agent: Codex
+    model: GPT-5
