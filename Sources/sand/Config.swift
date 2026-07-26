@@ -324,6 +324,45 @@ struct Config: Decodable, Sendable {
         }
     }
 
+    struct RunnerPool: Decodable, Sendable {
+        let min: Int
+        let max: Int
+        let pollInterval: TimeInterval
+        let repositories: [String]
+        let matchLabels: [String]
+
+        init(
+            min: Int = 1,
+            max: Int,
+            pollInterval: TimeInterval = 30,
+            repositories: [String],
+            matchLabels: [String]
+        ) {
+            self.min = min
+            self.max = max
+            self.pollInterval = pollInterval
+            self.repositories = repositories
+            self.matchLabels = matchLabels
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.min = try container.decodeIfPresent(Int.self, forKey: .min) ?? 1
+            self.max = try container.decode(Int.self, forKey: .max)
+            self.pollInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .pollInterval) ?? 30
+            self.repositories = try container.decode([String].self, forKey: .repositories)
+            self.matchLabels = try container.decode([String].self, forKey: .matchLabels)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case min
+            case max
+            case pollInterval
+            case repositories
+            case matchLabels
+        }
+    }
+
     struct RunnerConfig: Decodable, Sendable {
         let name: String
         let vm: VM
@@ -332,6 +371,27 @@ struct Config: Decodable, Sendable {
         let postRun: String?
         let stopAfter: Int?
         let healthCheck: HealthCheck?
+        let pool: RunnerPool?
+
+        init(
+            name: String,
+            vm: VM,
+            provisioner: Provisioner,
+            preRun: String?,
+            postRun: String?,
+            stopAfter: Int?,
+            healthCheck: HealthCheck?,
+            pool: RunnerPool? = nil
+        ) {
+            self.name = name
+            self.vm = vm
+            self.provisioner = provisioner
+            self.preRun = preRun
+            self.postRun = postRun
+            self.stopAfter = stopAfter
+            self.healthCheck = healthCheck
+            self.pool = pool
+        }
     }
 
     let runners: [RunnerConfig]
@@ -357,7 +417,8 @@ struct Config: Decodable, Sendable {
                 preRun: runner.preRun,
                 postRun: runner.postRun,
                 stopAfter: runner.stopAfter,
-                healthCheck: runner.healthCheck
+                healthCheck: runner.healthCheck,
+                pool: runner.pool
             )
         }
         return Config(runners: expandedRunners)

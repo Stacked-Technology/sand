@@ -175,4 +175,38 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runners.last?.vm.source.resolvedSource, "file://\(home)/vm-b")
         XCTAssertEqual(config.runners.first?.healthCheck?.command, "true")
     }
+
+    func testParsesRunnerPoolDefaultsAndOverrides() throws {
+        let yaml = """
+        runners:
+          - name: runner-pool
+            pool:
+              min: 1
+              max: 3
+              pollInterval: 20
+              repositories: [mobile, api]
+              matchLabels: [macos-pool, release]
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+            provisioner:
+              type: github
+              config:
+                appId: 42
+                organization: acme
+                privateKeyPath: ~/key.pem
+                runnerName: runner-pool
+                extraLabels: [macos-pool, release]
+        """
+        let url = try writeTempFile(contents: yaml)
+        let runner = try XCTUnwrap(Config.load(path: url.path).runners.first)
+        let pool = try XCTUnwrap(runner.pool)
+        XCTAssertEqual(pool.min, 1)
+        XCTAssertEqual(pool.max, 3)
+        XCTAssertEqual(pool.pollInterval, 20)
+        XCTAssertEqual(pool.repositories, ["mobile", "api"])
+        XCTAssertEqual(pool.matchLabels, ["macos-pool", "release"])
+        XCTAssertNil(runner.stopAfter)
+    }
 }

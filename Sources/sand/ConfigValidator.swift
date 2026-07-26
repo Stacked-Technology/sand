@@ -24,16 +24,46 @@ final class ConfigValidator {
     private func validateRunners(_ runners: [Config.RunnerConfig]) -> [ConfigValidationIssue] {
         var issues: [ConfigValidationIssue] = []
         var seenNames = Set<String>()
+        var reservedVMNames = Set<String>()
+        var reservedGitHubRunnerNames = Set<String>()
 
         for runner in runners {
             let trimmedName = runner.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let label = trimmedName.isEmpty ? "runner <unnamed>" : "runner \(trimmedName)"
             if trimmedName.isEmpty {
                 issues.append(.init(severity: .error, message: "runner name must not be empty."))
+            } else if trimmedName != runner.name {
+                issues.append(.init(
+                    severity: .error,
+                    message: "runner name must not contain surrounding whitespace."
+                ))
             } else if seenNames.contains(trimmedName) {
                 issues.append(.init(severity: .error, message: "runner name must be unique: \(trimmedName)."))
             } else {
                 seenNames.insert(trimmedName)
+            }
+            let slotCount = runner.pool?.max ?? 1
+            if (1...16).contains(slotCount) {
+                for slot in 1...slotCount {
+                    let vmName = slot == 1 ? trimmedName : "\(trimmedName)-\(slot)"
+                    if !vmName.isEmpty, !reservedVMNames.insert(vmName).inserted {
+                        issues.append(.init(
+                            severity: .error,
+                            message: "runner VM name collides with another configured slot: \(vmName)."
+                        ))
+                    }
+                    if let github = runner.provisioner.github {
+                        let baseName = github.runnerName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let registrationName = slot == 1 ? baseName : "\(baseName)-\(slot)"
+                        if !registrationName.isEmpty,
+                           !reservedGitHubRunnerNames.insert(registrationName).inserted {
+                            issues.append(.init(
+                                severity: .error,
+                                message: "GitHub runner name collides with another configured slot: \(registrationName)."
+                            ))
+                        }
+                    }
+                }
             }
             if let stopAfter = runner.stopAfter, stopAfter <= 0 {
                 issues.append(.init(
@@ -50,6 +80,7 @@ final class ConfigValidator {
             }
             validateVM(runner.vm, issues: &runnerIssues)
             validateProvisioner(runner.provisioner, issues: &runnerIssues)
+            validatePool(runner, issues: &runnerIssues)
             if let healthCheck = runner.healthCheck {
                 validateHealthCheck(healthCheck, issues: &runnerIssues)
             }
@@ -63,6 +94,133 @@ final class ConfigValidator {
         }
 
         return issues
+    }
+
+    private func validatePool(_ runner: Config.RunnerConfig, issues: inout [ConfigValidationIssue]) {
+        guard let pool = runner.pool else {
+            return
+        }
+        guard runner.provisioner.type == .github, let github = runner.provisioner.github else {
+            issues.append(.init(severity: .error, message: "pool requires a github provisioner."))
+            return
+        }
+        if !github.ephemeral {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires provisioner.config.ephemeral: true so every VM accepts only one job."
+            ))
+        }
+        if runner.stopAfter != nil {
+            issues.append(.init(
+                severity: .error,
+                message: "pool owns runner lifecycle; omit stopAfter."
+            ))
+        }
+        if github.repository != nil {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires organization-level registration; omit provisioner.config.repository."
+            ))
+        }
+        if runner.vm.cache != nil {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.cache to be omitted so jobs cannot persist executable data across ephemeral VMs."
+            ))
+        }
+        if !runner.vm.mounts.isEmpty {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.mounts to be empty so jobs cannot access or persist data on the host."
+            ))
+        }
+        if runner.vm.hardware?.audio != false {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.hardware.audio: false."
+            ))
+        }
+        if !runner.vm.run.noGraphics {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.run.noGraphics: true."
+            ))
+        }
+        if !runner.vm.run.noClipboard {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.run.noClipboard: true."
+            ))
+        }
+        if runner.vm.run.network != .softnet {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.run.network: softnet."
+            ))
+        }
+        let blockTargets = runner.vm.run.softnetBlock.map(SoftnetPolicyTargets.parse) ?? []
+        if !blockTargets.contains("@host") {
+            issues.append(.init(
+                severity: .error,
+                message: "pool requires vm.run.softnetBlock to include @host."
+            ))
+        }
+        if pool.min < 1 {
+            issues.append(.init(severity: .error, message: "pool.min must be at least 1."))
+        }
+        if pool.max < pool.min {
+            issues.append(.init(severity: .error, message: "pool.max must be greater than or equal to pool.min."))
+        }
+        if pool.max > 16 {
+            issues.append(.init(severity: .error, message: "pool.max must not exceed 16."))
+        }
+        if pool.pollInterval < 15 {
+            issues.append(.init(severity: .error, message: "pool.pollInterval must be at least 15 seconds."))
+        }
+        if pool.repositories.isEmpty {
+            issues.append(.init(severity: .error, message: "pool.repositories must contain at least one repository."))
+        }
+        var seenRepositories = Set<String>()
+        for repository in pool.repositories {
+            let trimmed = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.contains("/") {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.repositories entries must be non-empty repository names without '/'."
+                ))
+            } else if trimmed != repository {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.repositories entries must not contain surrounding whitespace."
+                ))
+            } else if !seenRepositories.insert(trimmed).inserted {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.repositories must not contain duplicates: \(trimmed)."
+                ))
+            }
+        }
+        if pool.matchLabels.isEmpty {
+            issues.append(.init(severity: .error, message: "pool.matchLabels must contain at least one label."))
+        }
+        let availableLabels = Set(["sand"] + (github.extraLabels ?? []))
+        var seenLabels = Set<String>()
+        for label in pool.matchLabels {
+            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                issues.append(.init(severity: .error, message: "pool.matchLabels entries must not be empty."))
+            } else if !seenLabels.insert(trimmed).inserted {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.matchLabels must not contain duplicates: \(trimmed)."
+                ))
+            } else if !availableLabels.contains(trimmed) {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.matchLabels entry '\(trimmed)' is not registered by the GitHub provisioner."
+                ))
+            }
+        }
     }
 
     private func validateVM(_ vm: Config.VM, issues: inout [ConfigValidationIssue]) {
@@ -175,6 +333,13 @@ final class ConfigValidator {
             if github.appId <= 0 {
                 issues.append(.init(severity: .error, message: "provisioner.config.appId must be greater than 0."))
             }
+            let runnerName = github.runnerName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if runnerName != github.runnerName {
+                issues.append(.init(
+                    severity: .error,
+                    message: "provisioner.config.runnerName must not contain surrounding whitespace."
+                ))
+            }
             if github.organization.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 issues.append(.init(severity: .error, message: "provisioner.config.organization must not be empty."))
             }
@@ -204,7 +369,7 @@ final class ConfigValidator {
 
     private func validateRunnerCache(_ runner: Config.RunnerConfig, issues: inout [ConfigValidationIssue]) {
         guard let cache = runner.vm.cache else {
-            if runner.provisioner.type == .github {
+            if runner.provisioner.type == .github, runner.pool == nil {
                 issues.append(.init(
                     severity: .warning,
                     message: "github provisioner configured without vm.cache; runner cache is disabled."
