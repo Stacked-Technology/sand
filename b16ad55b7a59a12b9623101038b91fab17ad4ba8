@@ -1,0 +1,23 @@
+intent:
+  id: intent/2026-07-26/live-runner-pool-preflight
+  change_type: feature
+  scope: GitHub runner pool readiness validation
+  summary: Fail before runner installation when the GitHub App cannot register organization runners or inspect configured Actions queues.
+  decision: Add a read-only pool-check command that requests and discards a narrowly scoped runner registration token, then snapshots queue and runner state with a separately read-narrowed installation token.
+  constraints:
+    - Preflight tokens must be scoped to configured repositories and only the permissions required for each check.
+    - Registration, installation, and API tokens must never be logged.
+    - Permission and repository failures must provide actionable guidance without echoing GitHub response bodies.
+    - The command must not create a runner or other GitHub resource.
+    - Existing runtime registration behavior remains compatible.
+  intent_priority: must
+  code_locations:
+    - Sources/sand/PoolCheck.swift
+    - Sources/sand/GitHub/GitHubService.swift
+    - Sources/sand/Sand.swift
+    - Tests/sandTests/GitHubRunnerPoolMonitorTests.swift
+    - Tests/sandTests/GitHubServiceTests.swift
+  requested_by: Rick
+  recorded_by:
+    agent: Codex
+    model: GPT-5
