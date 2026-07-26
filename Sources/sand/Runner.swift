@@ -57,6 +57,7 @@ struct Runner: Sendable {
     }
 
     func run() async throws {
+        try Task.checkCancellation()
         if let stopAfter = config.stopAfter {
             guard stopAfter > 0 else {
                 return
@@ -82,9 +83,11 @@ struct Runner: Sendable {
     }
 
     private func runOnce() async throws {
+        try Task.checkCancellation()
         let stopAfterLabel = config.stopAfter.map(String.init) ?? "nil"
         logger.debug("runOnce start (vm=\(vmName), stopAfter=\(stopAfterLabel))")
-        await applyRestartBackoffIfNeeded()
+        try await applyRestartBackoffIfNeeded()
+        try Task.checkCancellation()
         let name = vmName
         let vm = config.vm
         let provisionerConfig = config.provisioner
@@ -96,11 +99,14 @@ struct Runner: Sendable {
             logger.error("prepare source \(source) failed: \(String(describing: error))")
             throw error
         }
+        try Task.checkCancellation()
         do {
             if try await tart.isRunning(name: name) {
                 logger.info("VM \(name) already running, stopping before boot")
                 try await tart.stop(name: name)
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             logger.warning("preflight cleanup failed: \(String(describing: error))")
         }
@@ -109,9 +115,20 @@ struct Runner: Sendable {
             try await tart.clone(source: source, name: name)
         } catch {
             logger.error("clone VM \(name) from \(source) failed: \(String(describing: error))")
+            if Task.isCancelled {
+                await CancellationResistantCleanup.run {
+                    try? await tart.delete(name: name)
+                }
+            }
             throw error
         }
         await shutdownCoordinator.activate(name: name)
+        do {
+            try Task.checkCancellation()
+        } catch {
+            await shutdownCoordinator.cleanup(reason: "runner task cancelled after clone")
+            throw error
+        }
         do {
             try await applyVMConfigIfNeeded(name: name, vm: vm)
         } catch {
@@ -1139,7 +1156,7 @@ struct Runner: Sendable {
         }
     }
 
-    private func applyRestartBackoffIfNeeded() async {
+    private func applyRestartBackoffIfNeeded() async throws {
         let (delay, reason) = await restartBackoff.takePending()
         guard delay > 0 else {
             logger.debug("restart backoff: none pending")
@@ -1155,11 +1172,7 @@ struct Runner: Sendable {
         } else {
             logger.warning("restart backoff \(delay)s")
         }
-        do {
-            try await Task.sleep(nanoseconds: nanos(from: delay))
-        } catch {
-            return
-        }
+        try await Task.sleep(nanoseconds: nanos(from: delay))
     }
 
     private func logLines(logger: Logger, _ text: String, level: LogLevel) {
@@ -1336,6 +1349,14 @@ struct Runner: Sendable {
             return
         }
         try fileManager.createDirectory(atPath: trimmed, withIntermediateDirectories: true)
+    }
+}
+
+enum CancellationResistantCleanup {
+    static func run(_ operation: @escaping @Sendable () async -> Void) async {
+        await Task.detached {
+            await operation()
+        }.value
     }
 }
 

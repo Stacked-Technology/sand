@@ -344,7 +344,10 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
             }
             return nil
         }
-        return try await handle.waitAsync()
+        return try await waitForProcess(
+            handle,
+            timeout: .seconds(86_400)
+        )
     }
 
     func start(executable: String, arguments: [String]) throws -> ProcessHandle {

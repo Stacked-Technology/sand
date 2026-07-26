@@ -59,6 +59,19 @@ struct GitHubProvisionerConfig: Decodable, Sendable {
         case extraLabels
         case runnerGroup
     }
+
+    func withRunnerName(_ name: String) -> GitHubProvisionerConfig {
+        GitHubProvisionerConfig(
+            appId: appId,
+            organization: organization,
+            repository: repository,
+            privateKeyPath: privateKeyPath,
+            runnerName: name,
+            ephemeral: ephemeral,
+            extraLabels: extraLabels,
+            runnerGroup: runnerGroup
+        )
+    }
 }
 
 struct GitHubProvisioner: Sendable {

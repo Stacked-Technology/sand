@@ -67,10 +67,15 @@ struct Run: AsyncParsableCommand {
         let provisioner = GitHubProvisioner()
         let runnerVersionResolver = GitHubRunnerVersionResolver()
         var runners: [Runner] = []
+        var pools: [RunnerPool] = []
         var cleanupTargets: [VMShutdownCoordinator] = []
         var runnerControls: [RunnerControl] = []
-        for (index, runnerConfig) in config.runners.enumerated() {
-            let runnerIndex = index + 1
+        var poolControls: [RunnerPoolControl] = []
+        var runtimeIndex = 0
+
+        func makeSlot(_ runnerConfig: Config.RunnerConfig) throws -> (runner: Runner, slot: RunnerPoolSlot) {
+            runtimeIndex += 1
+            let runnerIndex = runtimeIndex
             let runnerName = runnerConfig.name
             let logLabel = runnerName.isEmpty ? "runner\(runnerIndex)" : runnerName
             let tart = Tart(processRunner: processRunner, logger: Logger(label: "tart.\(logLabel)", minimumLevel: level, sink: logSink))
@@ -94,11 +99,86 @@ struct Run: AsyncParsableCommand {
                 logLevel: level,
                 logSink: logSink
             )
-            runners.append(runner)
+            return (
+                runner,
+                RunnerPoolSlot(
+                    index: runnerIndex - 1,
+                    name: runnerName,
+                    registrationName: runnerConfig.provisioner.github?.runnerName ?? runnerName,
+                    runner: runner
+                )
+            )
+        }
+
+        for runnerConfig in config.runners {
+            guard let poolConfig = runnerConfig.pool else {
+                runners.append(try makeSlot(runnerConfig).runner)
+                continue
+            }
+            guard let githubConfig = runnerConfig.provisioner.github else {
+                throw ValidationError("Runner pool \(runnerConfig.name) requires a GitHub provisioner.")
+            }
+            var poolSlots: [RunnerPoolSlot] = []
+            var poolRunnerNames = Set<String>()
+            for slotOffset in 0..<poolConfig.max {
+                let slotConfig = runnerConfig.poolSlot(
+                    index: slotOffset + 1,
+                    baseline: slotOffset < poolConfig.min
+                )
+                let components = try makeSlot(slotConfig)
+                if let registrationName = slotConfig.provisioner.github?.runnerName {
+                    poolRunnerNames.insert(registrationName)
+                }
+                poolSlots.append(
+                    RunnerPoolSlot(
+                        index: slotOffset,
+                        name: slotConfig.name,
+                        registrationName: slotConfig.provisioner.github?.runnerName ?? slotConfig.name,
+                        run: {
+                            try await components.runner.run()
+                        }
+                    )
+                )
+            }
+            let auth = try GitHubAuth(
+                appId: githubConfig.appId,
+                privateKeyPath: githubConfig.privateKeyPath
+            )
+            let monitor = GitHubRunnerPoolMonitor(
+                auth: auth,
+                session: URLSession.shared,
+                organization: githubConfig.organization,
+                repositories: poolConfig.repositories,
+                matchLabels: poolConfig.matchLabels,
+                runnerNames: poolRunnerNames
+            )
+            let poolControl = RunnerPoolControl()
+            poolControls.append(poolControl)
+            pools.append(
+                RunnerPool(
+                    config: poolConfig,
+                    slots: poolSlots,
+                    monitor: monitor,
+                    logger: Logger(
+                        label: "pool.\(runnerConfig.name)",
+                        minimumLevel: level,
+                        sink: logSink
+                    ),
+                    control: poolControl
+                )
+            )
         }
         let shutdownLogger = Logger(label: "sand.shutdown", minimumLevel: level, sink: logSink)
         let signalHandler = SignalHandler(signals: [SIGINT, SIGTERM], logger: shutdownLogger) {
             let group = DispatchGroup()
+            for control in poolControls {
+                group.enter()
+                Task {
+                    await control.beginShutdown()
+                    group.leave()
+                }
+            }
+            group.wait()
             for control in runnerControls {
                 group.enter()
                 Task {
@@ -115,6 +195,14 @@ struct Run: AsyncParsableCommand {
                 }
             }
             group.wait()
+            for control in poolControls {
+                group.enter()
+                Task {
+                    await control.waitForQuiescence()
+                    group.leave()
+                }
+            }
+            group.wait()
         }
         defer {
             _ = signalHandler
@@ -123,6 +211,11 @@ struct Run: AsyncParsableCommand {
             for runner in runners {
                 group.addTask {
                     try await runner.run()
+                }
+            }
+            for pool in pools {
+                group.addTask {
+                    try await pool.run()
                 }
             }
             try await group.waitForAll()

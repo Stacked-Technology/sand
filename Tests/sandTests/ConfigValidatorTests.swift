@@ -323,4 +323,177 @@ final class ConfigValidatorTests: XCTestCase {
             message: "runner runner-1: vm.cache.host must be a directory: \(cacheFile.path)."
         )))
     }
+
+    func testValidRunnerPoolHasNoErrors() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                min: 1,
+                max: 2,
+                pollInterval: 15,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let issues = ConfigValidator().validate(Config(runners: [runner]))
+        XCTAssertTrue(issues.isEmpty, "\(issues)")
+    }
+
+    func testRunnerPoolRejectsUnsafeAndInvalidConfiguration() throws {
+        let runner = try makePoolRunner(
+            repository: "repo",
+            ephemeral: false,
+            stopAfter: 1,
+            mountsHost: true,
+            pool: Config.RunnerPool(
+                min: 0,
+                max: 17,
+                pollInterval: 1,
+                repositories: ["", "owner/repo", "repo", "repo", " padded "],
+                matchLabels: ["", "missing", "missing"]
+            )
+        )
+        let issues = ConfigValidator().validate(Config(runners: [runner]))
+        let messages = issues.map(\.message)
+        XCTAssertTrue(messages.contains { $0.contains("pool requires provisioner.config.ephemeral: true") })
+        XCTAssertTrue(messages.contains { $0.contains("pool owns runner lifecycle; omit stopAfter") })
+        XCTAssertTrue(messages.contains { $0.contains("pool requires organization-level registration") })
+        XCTAssertTrue(messages.contains { $0.contains("pool requires vm.cache to be omitted") })
+        XCTAssertTrue(messages.contains { $0.contains("pool requires vm.mounts to be empty") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.min must be at least 1") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.max must not exceed 16") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.pollInterval must be at least 15 seconds") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.repositories entries must be non-empty") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.repositories entries must not contain surrounding whitespace") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.repositories must not contain duplicates: repo") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.matchLabels entries must not be empty") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.matchLabels entry 'missing' is not registered") })
+        XCTAssertTrue(messages.contains { $0.contains("pool.matchLabels must not contain duplicates: missing") })
+    }
+
+    func testRunnerPoolRejectsUnisolatedVMOptions() throws {
+        let runner = try makePoolRunner(
+            isolatedVM: false,
+            pool: Config.RunnerPool(
+                max: 2,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [runner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains { $0.contains("vm.hardware.audio: false") })
+        XCTAssertTrue(messages.contains { $0.contains("vm.run.noClipboard: true") })
+        XCTAssertTrue(messages.contains { $0.contains("vm.run.network: softnet") })
+        XCTAssertTrue(messages.contains { $0.contains("vm.run.softnetBlock to include @host") })
+    }
+
+    func testRunnerPoolRejectsWhitespaceNamesAndHugeMaximum() throws {
+        let runner = try makePoolRunner(
+            name: " runner ",
+            runnerName: " registration ",
+            pool: Config.RunnerPool(
+                max: Int.max,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [runner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains {
+            $0.contains("runner name must not contain surrounding whitespace")
+        })
+        XCTAssertTrue(messages.contains {
+            $0.contains("provisioner.config.runnerName must not contain surrounding whitespace")
+        })
+        XCTAssertTrue(messages.contains { $0.contains("pool.max must not exceed 16") })
+    }
+
+    func testRunnerPoolRejectsGeneratedVMAndGitHubNameCollisions() throws {
+        let poolRunner = try makePoolRunner(
+            name: "runner",
+            runnerName: "registration",
+            pool: Config.RunnerPool(
+                max: 2,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let collidingRunner = try makePoolRunner(
+            name: "runner-2",
+            runnerName: "registration-2",
+            pool: Config.RunnerPool(
+                max: 1,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [poolRunner, collidingRunner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains {
+            $0.contains("runner VM name collides with another configured slot: runner-2")
+        })
+        XCTAssertTrue(messages.contains {
+            $0.contains("GitHub runner name collides with another configured slot: registration-2")
+        })
+    }
+
+    private func makePoolRunner(
+        name: String = "runner-pool",
+        runnerName: String = "runner-pool",
+        repository: String? = nil,
+        ephemeral: Bool = true,
+        stopAfter: Int? = nil,
+        mountsHost: Bool = false,
+        isolatedVM: Bool = true,
+        pool: Config.RunnerPool
+    ) throws -> Config.RunnerConfig {
+        let keyURL = try writeTempFile(contents: "key", suffix: ".pem")
+        let vm = Config.VM(
+            source: Config.VMSource(type: .oci, image: "ghcr.io/acme/vm:latest", path: nil),
+            hardware: Config.Hardware(
+                ramGb: nil,
+                cpuCores: nil,
+                display: nil,
+                audio: isolatedVM ? false : nil
+            ),
+            mounts: mountsHost
+                ? [Config.DirectoryMount(hostPath: "/tmp", name: "host", mode: .rw)]
+                : [],
+            cache: repository == "repo"
+                ? Config.Cache(hostPath: "/tmp/sand-cache", name: "sand-cache")
+                : nil,
+            run: isolatedVM
+                ? Config.RunOptions(
+                    noGraphics: true,
+                    noClipboard: true,
+                    network: .softnet,
+                    softnetBlock: "@host"
+                )
+                : .default,
+            diskSizeGb: nil,
+            ssh: .standard
+        )
+        let github = GitHubProvisionerConfig(
+            appId: 1,
+            organization: "acme",
+            repository: repository,
+            privateKeyPath: keyURL.path,
+            runnerName: runnerName,
+            ephemeral: ephemeral,
+            extraLabels: ["macos-pool"]
+        )
+        return Config.RunnerConfig(
+            name: name,
+            vm: vm,
+            provisioner: Config.Provisioner(type: .github, script: nil, github: github),
+            preRun: nil,
+            postRun: nil,
+            stopAfter: stopAfter,
+            healthCheck: Config.HealthCheck(command: "true"),
+            pool: pool
+        )
+    }
 }

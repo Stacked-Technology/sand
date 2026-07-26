@@ -112,7 +112,7 @@ Create a `config.yml` and run the CLI with `--config`.
 
 ### GitHub Actions setup
 
-1) Create a GitHub App and grant `Self-hosted runners` permission set to `Read & Write` at the organization level. https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app
+1) Create a GitHub App and grant `Self-hosted runners` permission set to `Read & Write` at the organization level. Runner pools also require repository `Actions` permission set to `Read-only`. https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app
 2) Install the app on the organization or the specific repository you want to run against.
 3) Download the private key and set `appId`, `organization`, `repository` (optional), and `privateKeyPath` in your config.
 
@@ -155,6 +155,67 @@ Set `provisioner.config.runnerGroup` to register an organization runner directly
 To enable runner caching, set `vm.cache`. The GitHub provisioner reuses the Actions runner archive from that mount between restarts; on a cache miss it downloads the tarball and stores it in the mounted directory. On macOS guests, the cache directory resolves to `/Volumes/My Shared Files/<name>` (with `name` acting as the share name).
 
 Sand resolves the latest Actions runner version at runtime via the GitHub API and uses that version for both the download URL and the cache filename. If version resolution fails and a cache directory is available, sand falls back to the newest cached runner tarball it can find.
+
+### Demand-aware runner pools
+
+Add `pool` to keep a warm runner online and start extra isolated runners only
+when matching jobs are queued behind busy pool runners:
+
+```yaml
+runners:
+  - name: runner-pool
+    vm:
+      source:
+        type: oci
+        image: ghcr.io/cirruslabs/macos-runner:tahoe
+      hardware:
+        audio: false
+      run:
+        noGraphics: true
+        noClipboard: true
+        network: softnet
+        softnetBlock: "@host"
+    provisioner:
+      type: github
+      config:
+        appId: 123456
+        organization: my-org
+        privateKeyPath: ~/my-app.private-key.pem
+        runnerName: runner-pool
+        runnerGroup: mac-runners
+        ephemeral: true
+        extraLabels:
+          - macos-pool
+          - release
+    pool:
+      min: 1
+      max: 2
+      pollInterval: 30
+      repositories:
+        - mobile-app
+      matchLabels:
+        - macos-pool
+        - release
+```
+
+Sand polls only the listed repositories and counts queued jobs containing every
+`matchLabels` entry. Desired capacity is the number of busy pool runners plus
+matching queued jobs, clamped between `min` and `max`. The first runner keeps
+the configured name; additional slots use `runner-pool-2`, `runner-pool-3`,
+and so on.
+
+Pool runners must use organization registration and `ephemeral: true`, and
+`stopAfter` must be omitted. Pool mode also rejects `vm.cache` and all
+`vm.mounts`; otherwise an untrusted job could persist executable data or reach
+host files across supposedly ephemeral guests. It also requires audio,
+graphics, and clipboard access to be disabled plus Softnet with an `@host`
+block. Every VM still accepts at most one Actions job:
+the warm slots are destroyed and recreated after each job, while burst slots
+exit after one job and are started again only when demand requires them.
+If queued demand disappears before a burst runner receives work, Sand leaves
+that runner safely online rather than risking a race with GitHub assigning a
+job during teardown. It accepts the next matching job, then destroys its VM
+and returns the pool to its warm minimum.
 
 Common pitfalls:
 - `vm.cache.host` must be a directory (missing paths are created; file paths are rejected).
