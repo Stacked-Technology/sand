@@ -217,6 +217,18 @@ that runner safely online rather than risking a race with GitHub assigning a
 job during teardown. It accepts the next matching job, then destroys its VM
 and returns the pool to its warm minimum.
 
+Before starting a pool, verify that its GitHub App installation can inspect
+the configured repositories, queued Actions jobs, and organization runners:
+
+```sh
+sand pool-check --config sand.yml
+```
+
+This live check fails with permission guidance when the App is missing
+repository `Actions: Read-only`, organization `Self-hosted runners: Read and
+write`, an explicitly configured repository, or acceptance of updated
+installation permissions.
+
 Common pitfalls:
 - `vm.cache.host` must be a directory (missing paths are created; file paths are rejected).
 - `vm.cache` is ignored unless the provisioner type is `github`.

@@ -6,7 +6,7 @@ import Foundation
 @available(macOS 15.0, *)
 struct Sand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        subcommands: [Run.self, Destroy.self, Doctor.self, Validate.self]
+        subcommands: [Run.self, Destroy.self, Doctor.self, Validate.self, PoolCheck.self]
     )
 }
 
