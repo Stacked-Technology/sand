@@ -23,6 +23,40 @@ enum SoftnetPolicyTargets {
         return Array(Set(normalizedTargets)).sorted()
     }
 
+    static func contains(address: String, target: String) -> Bool {
+        guard target != "@host",
+              let prefix = target.split(separator: "/").last else {
+            return false
+        }
+        return normalized([target]) == normalized(["\(address)/\(prefix)"])
+    }
+
+    static func isGloballyRoutableIPv4(_ address: String) -> Bool {
+        let nonGlobalRanges = [
+            "0.0.0.0/8",
+            "10.0.0.0/8",
+            "100.64.0.0/10",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.0.0.0/24",
+            "192.0.2.0/24",
+            "192.88.99.0/24",
+            "192.168.0.0/16",
+            "198.18.0.0/15",
+            "198.51.100.0/24",
+            "203.0.113.0/24",
+            "224.0.0.0/4",
+            "240.0.0.0/4"
+        ]
+        guard normalized(["\(address)/32"]) != nil else {
+            return false
+        }
+        return !nonGlobalRanges.contains {
+            contains(address: address, target: $0)
+        }
+    }
+
     private static func normalize(_ target: String) -> String? {
         if target == "@host" {
             return target

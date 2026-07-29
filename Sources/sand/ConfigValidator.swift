@@ -80,6 +80,13 @@ final class ConfigValidator {
             }
             validateVM(runner.vm, issues: &runnerIssues)
             validateProvisioner(runner.provisioner, issues: &runnerIssues)
+            if runner.vm.run.guestDNS != nil,
+               runner.provisioner.type != .github {
+                runnerIssues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS requires a github provisioner so DNS is configured before deferred Softnet isolation."
+                ))
+            }
             validatePool(runner, issues: &runnerIssues)
             if let healthCheck = runner.healthCheck {
                 validateHealthCheck(healthCheck, issues: &runnerIssues)
@@ -277,6 +284,98 @@ final class ConfigValidator {
                 ))
             }
         }
+        if let guestDNS = vm.run.guestDNS {
+            if vm.run.network != .softnet {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS requires vm.run.network: softnet."
+                ))
+            }
+            if vm.run.softnetBlock == nil {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS requires vm.run.softnetBlock so DNS is probed after policy cutover."
+                ))
+            }
+            let networkService = guestDNS.networkService.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            if networkService.isEmpty {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.networkService must not be empty."
+                ))
+            } else if networkService != guestDNS.networkService {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.networkService must not contain surrounding whitespace."
+                ))
+            }
+            if guestDNS.servers.isEmpty {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.servers must contain at least one IPv4 address."
+                ))
+            } else if guestDNS.servers.count > 3 {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.servers must contain at most three IPv4 addresses."
+                ))
+            } else if SoftnetPolicyTargets.normalized(
+                guestDNS.servers.map { "\($0)/32" }
+            ) == nil {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.servers entries must be IPv4 addresses."
+                ))
+            } else if guestDNS.servers.contains(where: {
+                !SoftnetPolicyTargets.isGloballyRoutableIPv4($0)
+            }) {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.servers entries must be globally routable IPv4 addresses."
+                ))
+            } else if Set(guestDNS.servers).count != guestDNS.servers.count {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.servers must not contain duplicates."
+                ))
+            } else if let block = vm.run.softnetBlock {
+                let blockTargets = SoftnetPolicyTargets.parse(block)
+                if guestDNS.servers.contains(where: { server in
+                    blockTargets.contains {
+                        SoftnetPolicyTargets.contains(
+                            address: server,
+                            target: $0
+                        )
+                    }
+                }) {
+                    issues.append(.init(
+                        severity: .error,
+                        message: "vm.run.guestDNS.servers must not overlap vm.run.softnetBlock targets."
+                    ))
+                }
+            }
+            let probeHost = guestDNS.probeHost.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            if probeHost.isEmpty {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.probeHost must not be empty."
+                ))
+            } else if probeHost != guestDNS.probeHost {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.probeHost must not contain surrounding whitespace."
+                ))
+            } else if !Self.isDNSProbeHostname(probeHost) {
+                issues.append(.init(
+                    severity: .error,
+                    message: "vm.run.guestDNS.probeHost must be a non-local fully qualified DNS hostname."
+                ))
+            }
+        }
 
         if vm.ssh.user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             issues.append(.init(severity: .error, message: "vm.ssh.user must not be empty."))
@@ -303,6 +402,35 @@ final class ConfigValidator {
             }
             let resolvedName = Config.resolveMountName(hostPath: mount.hostPath, name: mount.name)
             validateMountName(resolvedName, label: "vm.mounts.name", issues: &issues)
+        }
+    }
+
+    private static func isDNSProbeHostname(_ value: String) -> Bool {
+        let lowercaseValue = value.lowercased()
+        guard value.count <= 253,
+              value.contains("."),
+              SoftnetPolicyTargets.normalized(["\(value)/32"]) == nil,
+              !lowercaseValue.hasSuffix(".local"),
+              !lowercaseValue.hasSuffix(".localhost"),
+              !lowercaseValue.hasSuffix(".test"),
+              !lowercaseValue.hasSuffix(".invalid"),
+              !lowercaseValue.hasSuffix(".example") else {
+            return false
+        }
+        let labels = value.split(
+            separator: ".",
+            omittingEmptySubsequences: false
+        )
+        return labels.allSatisfy { label in
+            guard !label.isEmpty,
+                  label.count <= 63,
+                  label.first != "-",
+                  label.last != "-" else {
+                return false
+            }
+            return label.allSatisfy {
+                $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-")
+            }
         }
     }
 

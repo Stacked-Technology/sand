@@ -238,12 +238,16 @@ struct Tart: Sendable {
     func startIsolatedCommand(
         readiness: GuestAgentReadiness,
         command: String,
+        preflightCommand: String? = nil,
         policyControl: any SoftnetPolicyControlling,
         blockTargets: [String]
     ) async throws -> ProcessHandle {
         try await policyControl.replacePolicy(allow: [], block: blockTargets)
         logger.info("Softnet network isolation applied")
-        return try startExec(name: readiness.vmName, command: command)
+        let isolatedCommand = preflightCommand.map {
+            "\($0)\n\(command)"
+        } ?? command
+        return try startExec(name: readiness.vmName, command: isolatedCommand)
     }
 
     func ip(name: String, wait: Int) async throws -> String {
