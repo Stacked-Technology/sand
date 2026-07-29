@@ -217,6 +217,167 @@ final class ConfigValidatorTests: XCTestCase {
         )))
     }
 
+    func testGuestDNSRejectsUnsafeAndInvalidConfiguration() throws {
+        let cases: [(runConfig: String, expected: String)] = [
+            (
+                """
+                network: default
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1]
+                """,
+                "vm.run.guestDNS requires vm.run.network: softnet."
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1]
+                """,
+                "vm.run.guestDNS requires vm.run.softnetBlock"
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: " "
+                  servers: [1.1.1.1]
+                """,
+                "vm.run.guestDNS.networkService must not be empty."
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: Ethernet
+                  servers: []
+                """,
+                "vm.run.guestDNS.servers must contain at least one IPv4 address."
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [not-an-address]
+                """,
+                "vm.run.guestDNS.servers entries must be IPv4 addresses."
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [192.168.2.1]
+                """,
+                "vm.run.guestDNS.servers entries must be globally routable IPv4 addresses."
+            ),
+            (
+                """
+                network: softnet
+                softnetBlock: "@host"
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [203.0.113.53]
+                """,
+                "vm.run.guestDNS.servers entries must be globally routable IPv4 addresses."
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1, 1.1.1.1]
+                """,
+                "vm.run.guestDNS.servers must not contain duplicates."
+            ),
+            (
+                """
+                network: softnet
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1, 8.8.8.8, 9.9.9.9, 8.8.4.4]
+                """,
+                "vm.run.guestDNS.servers must contain at most three IPv4 addresses."
+            ),
+            (
+                """
+                network: softnet
+                softnetBlock: "1.1.1.0/24,@host"
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1]
+                """,
+                "vm.run.guestDNS.servers must not overlap vm.run.softnetBlock targets."
+            ),
+            (
+                """
+                network: softnet
+                softnetBlock: "@host"
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1]
+                  probeHost: foo.localhost
+                """,
+                "vm.run.guestDNS.probeHost must be a non-local fully qualified DNS hostname."
+            ),
+            (
+                """
+                network: softnet
+                softnetBlock: "@host"
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1]
+                  probeHost: 127.0.0.1
+                """,
+                "vm.run.guestDNS.probeHost must be a non-local fully qualified DNS hostname."
+            ),
+            (
+                """
+                network: softnet
+                softnetBlock: "@host"
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1]
+                  probeHost: runner.test
+                """,
+                "vm.run.guestDNS.probeHost must be a non-local fully qualified DNS hostname."
+            )
+        ]
+
+        for testCase in cases {
+            let url = try writeTempFile(contents: """
+            runners:
+              - name: runner-1
+                vm:
+                  source:
+                    type: oci
+                    image: ghcr.io/acme/vm:latest
+                  run:
+            \(testCase.runConfig.split(separator: "\n").map { "        \($0)" }.joined(separator: "\n"))
+                provisioner:
+                  type: script
+                  config:
+                    run: "echo ok"
+            """)
+            let issues = ConfigValidator().validate(try Config.load(path: url.path))
+            XCTAssertTrue(
+                issues.contains {
+                    $0.severity == .error && $0.message.contains(testCase.expected)
+                },
+                "missing expected issue: \(testCase.expected); got \(issues)"
+            )
+            XCTAssertTrue(
+                issues.contains {
+                    $0.severity == .error
+                        && $0.message.contains("guestDNS requires a github provisioner")
+                },
+                "guestDNS must reject script provisioners; got \(issues)"
+            )
+        }
+    }
+
     func testEmptyRunnerGroupIsRejected() throws {
         let keyURL = try writeTempFile(contents: "key", suffix: ".pem")
         let vm = Config.VM(
@@ -470,7 +631,11 @@ final class ConfigValidatorTests: XCTestCase {
                     noGraphics: true,
                     noClipboard: true,
                     network: .softnet,
-                    softnetBlock: "@host"
+                    softnetBlock: "@host",
+                    guestDNS: Config.RunOptions.GuestDNS(
+                        networkService: "Ethernet",
+                        servers: ["1.1.1.1", "8.8.8.8"]
+                    )
                 )
                 : .default,
             diskSizeGb: nil,

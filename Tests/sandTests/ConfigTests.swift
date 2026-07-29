@@ -27,6 +27,9 @@ final class ConfigTests: XCTestCase {
                 noClipboard: true
                 network: softnet
                 softnetBlock: "@host"
+                guestDNS:
+                  networkService: Ethernet
+                  servers: [1.1.1.1, 8.8.8.8]
               diskSizeGb: 80
               ssh:
                 user: admin
@@ -71,6 +74,18 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runners.first?.vm.run.noClipboard, true)
         XCTAssertEqual(config.runners.first?.vm.run.network, .softnet)
         XCTAssertEqual(config.runners.first?.vm.run.softnetBlock, "@host")
+        XCTAssertEqual(
+            config.runners.first?.vm.run.guestDNS?.networkService,
+            "Ethernet"
+        )
+        XCTAssertEqual(
+            config.runners.first?.vm.run.guestDNS?.servers,
+            ["1.1.1.1", "8.8.8.8"]
+        )
+        XCTAssertEqual(
+            config.runners.first?.vm.run.guestDNS?.probeHost,
+            "broker.actions.githubusercontent.com"
+        )
         XCTAssertEqual(config.runners.first?.vm.diskSizeGb, 80)
         XCTAssertEqual(config.runners.first?.vm.ssh.user, "admin")
         XCTAssertEqual(config.runners.first?.vm.ssh.password, "admin")

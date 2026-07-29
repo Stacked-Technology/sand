@@ -243,6 +243,7 @@ final class TartTests: XCTestCase {
         _ = try await tart.startIsolatedCommand(
             readiness: readiness,
             command: "~/actions-runner/run.sh",
+            preflightCommand: "verify-isolated-network",
             policyControl: policy,
             blockTargets: ["@host"]
         )
@@ -250,7 +251,7 @@ final class TartTests: XCTestCase {
         XCTAssertEqual(events.snapshot(), [
             "start:tart exec ephemeral /bin/bash -lc /usr/bin/true",
             "policy:allow=;block=@host",
-            "start:tart exec ephemeral /bin/bash -lc ~/actions-runner/run.sh"
+            "start:tart exec ephemeral /bin/bash -lc verify-isolated-network\n~/actions-runner/run.sh"
         ])
     }
 

@@ -218,6 +218,35 @@ struct Runner: Sendable {
         deferredBlockTargets: [String],
         guestAgentReadiness: Tart.GuestAgentReadiness?
     ) async throws {
+        if let guestDNS = vm.run.guestDNS {
+            logger.info("configure guest DNS before network isolation")
+            let command = GuestDNSConfigurator.configurationCommand(
+                for: guestDNS
+            )
+            do {
+                let result = try await execWithRetry(
+                    command: command,
+                    ssh: ssh,
+                    stage: "guestDNS"
+                )
+                if let result {
+                    logIfNonEmpty(label: "stdout", text: result.stdout)
+                    logIfNonEmpty(label: "stderr", text: result.stderr)
+                }
+                logger.info("guest DNS configured")
+            } catch {
+                if await handleStageFailure(
+                    error,
+                    stage: "guestDNS",
+                    healthCheckState: nil
+                ) {
+                    await shutdownCoordinator.cleanup(reason: "guest DNS failed")
+                    return
+                }
+                await shutdownCoordinator.cleanup(reason: "guest DNS failed")
+                throw error
+            }
+        }
         if let preRun = config.preRun {
             logger.info("run preRun")
             logScript(preRun)
@@ -325,6 +354,9 @@ struct Runner: Sendable {
                             let runnerHandle = try await tart.startIsolatedCommand(
                                 readiness: guestAgentReadiness,
                                 command: plan.runnerCommand,
+                                preflightCommand: vm.run.guestDNS.map(
+                                    GuestDNSConfigurator.probeCommand
+                                ),
                                 policyControl: policyControl,
                                 blockTargets: deferredBlockTargets
                             )

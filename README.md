@@ -129,6 +129,10 @@ runners:
         noClipboard: true
         network: softnet
         softnetBlock: "@host"
+        guestDNS:
+          networkService: Ethernet
+          servers: [1.1.1.1, 8.8.8.8]
+          probeHost: broker.actions.githubusercontent.com
       cache:
         host: ~/.cache/sand/actions-runner
         name: sand-cache
@@ -147,6 +151,8 @@ runners:
 ```
 
 Set `vm.run.network` to `softnet` to pass Tart's `--net-softnet` option. Softnet restricts private-network access while preserving outbound access to globally routable addresses, but its default policy permits the VM gateway. Set `vm.run.softnetBlock` to `"@host"` to block that host/gateway exception. For GitHub provisioners, Sand permits host SSH only during trusted runner setup, verifies the Tart Guest Agent control channel, atomically applies the Softnet block, and then starts and monitors `run.sh` through `tart exec`. A GitHub Actions job therefore cannot start before Softnet acknowledges the host block, and no SSH connection is needed after cutover. Custom script provisioners retain the boot-time static block.
+
+On macOS guests, DHCP commonly advertises the VM gateway as the DNS resolver. Blocking `@host` also makes that resolver unreachable. For GitHub provisioners with `softnetBlock`, set `vm.run.guestDNS` to the active macOS network-service name and one to three globally routable IPv4 resolvers that are not blocked by that policy. Sand applies and exactly verifies those resolvers during trusted SSH setup, applies the Softnet block, flushes the guest DNS cache, and then resolves `probeHost` through the Tart Guest Agent before the untrusted runner process starts. `probeHost` defaults to `broker.actions.githubusercontent.com`. The setting is opt-in, currently supports macOS guests only, and requires guest-side passwordless `sudo` permission for `/usr/sbin/networksetup`.
 
 `softnetBlock` is rejected unless the selected network is `softnet`. The isolated GitHub lifecycle requires Tart 2.34.0 or newer, Softnet 0.21.0 or newer, and a guest image with Tart Guest Agent. Softnet must be installed separately and requires root SUID ownership or passwordless sudo; Sand validates both the binary and privilege setup before starting a runner.
 

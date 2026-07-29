@@ -179,28 +179,72 @@ struct Config: Decodable, Sendable {
             case softnet
         }
 
+        struct GuestDNS: Decodable, Sendable {
+            static let defaultProbeHost = "broker.actions.githubusercontent.com"
+
+            let networkService: String
+            let servers: [String]
+            let probeHost: String
+
+            init(
+                networkService: String,
+                servers: [String],
+                probeHost: String = Self.defaultProbeHost
+            ) {
+                self.networkService = networkService
+                self.servers = servers
+                self.probeHost = probeHost
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                self.networkService = try container.decode(
+                    String.self,
+                    forKey: .networkService
+                )
+                self.servers = try container.decode(
+                    [String].self,
+                    forKey: .servers
+                )
+                self.probeHost = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .probeHost
+                ) ?? Self.defaultProbeHost
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case networkService
+                case servers
+                case probeHost
+            }
+        }
+
         let noGraphics: Bool
         let noClipboard: Bool
         let network: Network
         let softnetBlock: String?
+        let guestDNS: GuestDNS?
 
         static let `default` = RunOptions(
             noGraphics: true,
             noClipboard: false,
             network: .default,
-            softnetBlock: nil
+            softnetBlock: nil,
+            guestDNS: nil
         )
 
         init(
             noGraphics: Bool,
             noClipboard: Bool,
             network: Network,
-            softnetBlock: String? = nil
+            softnetBlock: String? = nil,
+            guestDNS: GuestDNS? = nil
         ) {
             self.noGraphics = noGraphics
             self.noClipboard = noClipboard
             self.network = network
             self.softnetBlock = softnetBlock
+            self.guestDNS = guestDNS
         }
 
         init(from decoder: Decoder) throws {
@@ -209,6 +253,7 @@ struct Config: Decodable, Sendable {
             self.noClipboard = try container.decodeIfPresent(Bool.self, forKey: .noClipboard) ?? false
             self.network = try container.decodeIfPresent(Network.self, forKey: .network) ?? .default
             self.softnetBlock = try container.decodeIfPresent(String.self, forKey: .softnetBlock)
+            self.guestDNS = try container.decodeIfPresent(GuestDNS.self, forKey: .guestDNS)
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -216,6 +261,7 @@ struct Config: Decodable, Sendable {
             case noClipboard
             case network
             case softnetBlock
+            case guestDNS
         }
     }
 
