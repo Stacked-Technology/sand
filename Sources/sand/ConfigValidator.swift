@@ -172,8 +172,11 @@ final class ConfigValidator {
                 message: "pool requires vm.run.softnetBlock to include @host."
             ))
         }
-        if pool.min < 1 {
-            issues.append(.init(severity: .error, message: "pool.min must be at least 1."))
+        if pool.min < 0 {
+            issues.append(.init(severity: .error, message: "pool.min must not be negative."))
+        }
+        if pool.max < 1 {
+            issues.append(.init(severity: .error, message: "pool.max must be at least 1."))
         }
         if pool.max < pool.min {
             issues.append(.init(severity: .error, message: "pool.max must be greater than or equal to pool.min."))

@@ -210,6 +210,15 @@ matching queued jobs, clamped between `min` and `max`. The first runner keeps
 the configured name; additional slots use `runner-pool-2`, `runner-pool-3`,
 and so on.
 
+Set `pool.min` to `0` for cold-start mode. Sand remains online as the host-side
+dispatcher, starts no guest at launch, and starts the first isolated ephemeral
+runner only after a matching job is queued. `pool.max` must still be at least
+`1`. Jobs wait for Tart boot, trusted provisioning, and GitHub runner
+registration, so this mode trades idle memory for cold-start latency. A burst
+runner that is already online is left available when queued demand disappears
+to avoid racing GitHub's runner assignment; it is still limited to one job and
+is destroyed after its lifecycle completes.
+
 Pool runners must use organization registration and `ephemeral: true`, and
 `stopAfter` must be omitted. Pool mode also rejects `vm.cache` and all
 `vm.mounts`; otherwise an untrusted job could persist executable data or reach

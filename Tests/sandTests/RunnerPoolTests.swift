@@ -16,6 +16,32 @@ private actor ScriptedPoolMonitor: GitHubRunnerPoolMonitoring {
     }
 }
 
+private actor DemandGatedPoolMonitor: GitHubRunnerPoolMonitoring {
+    private let initialSnapshot: GitHubRunnerPoolSnapshot
+    private let demandSnapshot: GitHubRunnerPoolSnapshot
+    private let demandGate: PoolTestGate
+    private var snapshotCount = 0
+
+    init(
+        initialSnapshot: GitHubRunnerPoolSnapshot,
+        demandSnapshot: GitHubRunnerPoolSnapshot,
+        demandGate: PoolTestGate
+    ) {
+        self.initialSnapshot = initialSnapshot
+        self.demandSnapshot = demandSnapshot
+        self.demandGate = demandGate
+    }
+
+    func snapshot() async throws -> GitHubRunnerPoolSnapshot {
+        let currentSnapshot = snapshotCount == 0 ? initialSnapshot : demandSnapshot
+        snapshotCount += 1
+        if snapshotCount > 1 {
+            await demandGate.wait()
+        }
+        return currentSnapshot
+    }
+}
+
 private actor PoolSlotRecorder {
     private(set) var startedIndices: [Int] = []
     private(set) var cancelledIndices: [Int] = []
@@ -103,6 +129,101 @@ final class RunnerPoolTests: XCTestCase {
             ),
             2
         )
+        XCTAssertEqual(
+            RunnerPoolScaler.desiredRunnerCount(
+                minimum: 0,
+                maximum: 1,
+                busyRunners: 0,
+                queuedJobs: 0
+            ),
+            0
+        )
+        XCTAssertEqual(
+            RunnerPoolScaler.desiredRunnerCount(
+                minimum: 0,
+                maximum: 1,
+                busyRunners: 0,
+                queuedJobs: 1
+            ),
+            1
+        )
+    }
+
+    func testColdStartPoolWaitsForDemandBeforeStartingFirstSlot() async {
+        let now = Date()
+        let demandGate = PoolTestGate()
+        let monitor = DemandGatedPoolMonitor(
+            initialSnapshot: GitHubRunnerPoolSnapshot(
+                queuedJobs: 0,
+                busyRunners: 0,
+                onlineRunnerNames: [],
+                capturedAt: now
+            ),
+            demandSnapshot: GitHubRunnerPoolSnapshot(
+                queuedJobs: 1,
+                busyRunners: 0,
+                onlineRunnerNames: [],
+                capturedAt: now.addingTimeInterval(30)
+            ),
+            demandGate: demandGate
+        )
+        let recorder = PoolSlotRecorder()
+        let pool = makePool(
+            monitor: monitor,
+            recorder: recorder,
+            minimum: 0,
+            maximum: 1
+        )
+
+        let task = Task {
+            try await pool.run()
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        let startedBeforeDemand = await recorder.hasStarted(0)
+        XCTAssertFalse(startedBeforeDemand)
+
+        await demandGate.open()
+        let didStartOnDemand = await waitUntil {
+            await recorder.hasStarted(0)
+        }
+        XCTAssertTrue(didStartOnDemand)
+        task.cancel()
+        _ = try? await task.value
+    }
+
+    func testColdStartBurstSlotIsCancelledOnShutdown() async {
+        let monitor = ScriptedPoolMonitor(snapshots: [
+            GitHubRunnerPoolSnapshot(
+                queuedJobs: 1,
+                busyRunners: 0,
+                onlineRunnerNames: [],
+                capturedAt: Date()
+            )
+        ])
+        let recorder = PoolSlotRecorder()
+        let control = RunnerPoolControl()
+        let pool = makePool(
+            monitor: monitor,
+            recorder: recorder,
+            minimum: 0,
+            maximum: 1,
+            control: control
+        )
+
+        let task = Task {
+            try await pool.run()
+        }
+        let didStartBurst = await waitUntil {
+            await recorder.hasStarted(0)
+        }
+        XCTAssertTrue(didStartBurst)
+
+        await control.beginShutdown()
+        _ = try? await task.value
+        await control.waitForQuiescence()
+
+        let cancellationCount = await recorder.cancellationCount(0)
+        XCTAssertEqual(cancellationCount, 1)
     }
 
     func testPoolSlotsUseUniqueNamesAndOneJobBurstLifecycle() throws {
@@ -216,14 +337,17 @@ final class RunnerPoolTests: XCTestCase {
     }
 
     private func makePool(
-        monitor: ScriptedPoolMonitor,
-        recorder: PoolSlotRecorder
+        monitor: any GitHubRunnerPoolMonitoring,
+        recorder: PoolSlotRecorder,
+        minimum: Int = 1,
+        maximum: Int = 2,
+        control: RunnerPoolControl = RunnerPoolControl()
     ) -> RunnerPool {
-        let slots = (0..<2).map { index in
+        let slots = (0..<maximum).map { index in
             RunnerPoolSlot(
                 index: index,
-                name: index == 0 ? "runner-pool" : "runner-pool-2",
-                registrationName: index == 0 ? "runner-pool" : "runner-pool-2",
+                name: index == 0 ? "runner-pool" : "runner-pool-\(index + 1)",
+                registrationName: index == 0 ? "runner-pool" : "runner-pool-\(index + 1)",
                 run: {
                     await recorder.recordStart(index)
                     do {
@@ -237,15 +361,16 @@ final class RunnerPoolTests: XCTestCase {
         }
         return RunnerPool(
             config: Config.RunnerPool(
-                min: 1,
-                max: 2,
+                min: minimum,
+                max: maximum,
                 pollInterval: 0.01,
                 repositories: ["mobile"],
                 matchLabels: ["macos-pool"]
             ),
             slots: slots,
             monitor: monitor,
-            logger: Logger(label: "pool.test", minimumLevel: .error)
+            logger: Logger(label: "pool.test", minimumLevel: .error),
+            control: control
         )
     }
 

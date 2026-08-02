@@ -499,6 +499,52 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertTrue(issues.isEmpty, "\(issues)")
     }
 
+    func testColdStartRunnerPoolAllowsZeroWarmRunners() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                min: 0,
+                max: 1,
+                pollInterval: 15,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let issues = ConfigValidator().validate(Config(runners: [runner]))
+        XCTAssertTrue(issues.isEmpty, "\(issues)")
+    }
+
+    func testRunnerPoolRequiresAtLeastOneCapacitySlot() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                min: 0,
+                max: 0,
+                pollInterval: 15,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [runner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains { $0.contains("pool.max must be at least 1") })
+    }
+
+    func testRunnerPoolRejectsNegativeWarmMinimum() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                min: -1,
+                max: 1,
+                pollInterval: 15,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [runner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains { $0.contains("pool.min must not be negative") })
+    }
+
     func testRunnerPoolRejectsUnsafeAndInvalidConfiguration() throws {
         let runner = try makePoolRunner(
             repository: "repo",
@@ -520,7 +566,6 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertTrue(messages.contains { $0.contains("pool requires organization-level registration") })
         XCTAssertTrue(messages.contains { $0.contains("pool requires vm.cache to be omitted") })
         XCTAssertTrue(messages.contains { $0.contains("pool requires vm.mounts to be empty") })
-        XCTAssertTrue(messages.contains { $0.contains("pool.min must be at least 1") })
         XCTAssertTrue(messages.contains { $0.contains("pool.max must not exceed 16") })
         XCTAssertTrue(messages.contains { $0.contains("pool.pollInterval must be at least 15 seconds") })
         XCTAssertTrue(messages.contains { $0.contains("pool.repositories entries must be non-empty") })
