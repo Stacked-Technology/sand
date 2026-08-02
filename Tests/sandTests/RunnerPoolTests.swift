@@ -226,6 +226,166 @@ final class RunnerPoolTests: XCTestCase {
         XCTAssertEqual(cancellationCount, 1)
     }
 
+    func testCompletedBurstSlotIgnoresStaleBusyRunnerState() async {
+        let now = Date()
+        let monitor = ScriptedPoolMonitor(snapshots: [
+            GitHubRunnerPoolSnapshot(
+                queuedJobs: 1,
+                busyRunners: 0,
+                onlineRunnerNames: [],
+                capturedAt: now
+            ),
+            GitHubRunnerPoolSnapshot(
+                queuedJobs: 0,
+                busyRunners: 1,
+                onlineRunnerNames: ["runner-pool"],
+                capturedAt: now.addingTimeInterval(30),
+                busyRunnerNames: ["runner-pool"]
+            )
+        ])
+        let recorder = PoolSlotRecorder()
+        let control = RunnerPoolControl()
+        let pool = RunnerPool(
+            config: Config.RunnerPool(
+                min: 0,
+                max: 1,
+                pollInterval: 0.01,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            ),
+            slots: [
+                RunnerPoolSlot(
+                    index: 0,
+                    name: "runner-pool",
+                    registrationName: "runner-pool",
+                    run: {
+                        let attempt = await recorder.recordStartAndCount(0)
+                        if attempt == 1 {
+                            return
+                        }
+                        try? await Task.sleep(for: .seconds(60))
+                    }
+                )
+            ],
+            monitor: monitor,
+            logger: Logger(label: "pool.test", minimumLevel: .error),
+            control: control
+        )
+
+        let task = Task {
+            try await pool.run()
+        }
+        let didCompleteFirstRunner = await waitUntil {
+            await recorder.startCount(0) == 1
+        }
+        XCTAssertTrue(didCompleteFirstRunner)
+        try? await Task.sleep(for: .milliseconds(100))
+        let startsAfterStaleSnapshot = await recorder.startCount(0)
+        XCTAssertEqual(startsAfterStaleSnapshot, 1)
+
+        await control.beginShutdown()
+        _ = try? await task.value
+    }
+
+    func testStartupDoesNotReplaceOnlineRunnerWithoutQueuedDemand() async {
+        let monitor = ScriptedPoolMonitor(snapshots: [
+            GitHubRunnerPoolSnapshot(
+                queuedJobs: 0,
+                busyRunners: 1,
+                onlineRunnerNames: ["runner-pool"],
+                capturedAt: Date(),
+                busyRunnerNames: ["runner-pool"]
+            )
+        ])
+        let recorder = PoolSlotRecorder()
+        let control = RunnerPoolControl()
+        let pool = makePool(
+            monitor: monitor,
+            recorder: recorder,
+            minimum: 0,
+            maximum: 1,
+            control: control
+        )
+
+        let task = Task {
+            try await pool.run()
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        let started = await recorder.hasStarted(0)
+        XCTAssertFalse(started)
+
+        await control.beginShutdown()
+        _ = try? await task.value
+    }
+
+    func testFinishedSlotDoesNotSuppressDifferentBusyRunnerWhenDemandArrives() async {
+        let now = Date()
+        let monitor = ScriptedPoolMonitor(snapshots: [
+            GitHubRunnerPoolSnapshot(
+                queuedJobs: 2,
+                busyRunners: 0,
+                onlineRunnerNames: [],
+                capturedAt: now
+            ),
+            GitHubRunnerPoolSnapshot(
+                queuedJobs: 1,
+                busyRunners: 1,
+                onlineRunnerNames: ["runner-pool", "runner-pool-2"],
+                capturedAt: now.addingTimeInterval(30),
+                busyRunnerNames: ["runner-pool-2"]
+            )
+        ])
+        let recorder = PoolSlotRecorder()
+        let control = RunnerPoolControl()
+        let pool = RunnerPool(
+            config: Config.RunnerPool(
+                min: 0,
+                max: 2,
+                pollInterval: 0.01,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"]
+            ),
+            slots: [
+                RunnerPoolSlot(
+                    index: 0,
+                    name: "runner-pool",
+                    registrationName: "runner-pool",
+                    run: {
+                        let attempt = await recorder.recordStartAndCount(0)
+                        if attempt > 1 {
+                            try? await Task.sleep(for: .seconds(60))
+                        }
+                    }
+                ),
+                RunnerPoolSlot(
+                    index: 1,
+                    name: "runner-pool-2",
+                    registrationName: "runner-pool-2",
+                    run: {
+                        await recorder.recordStart(1)
+                        try? await Task.sleep(for: .seconds(60))
+                    }
+                )
+            ],
+            monitor: monitor,
+            logger: Logger(label: "pool.test", minimumLevel: .error),
+            control: control
+        )
+
+        let task = Task {
+            try await pool.run()
+        }
+        let didStartReplacement = await waitUntil {
+            await recorder.startCount(0) == 2
+        }
+        XCTAssertTrue(didStartReplacement)
+        let activeRunnerStarts = await recorder.startCount(1)
+        XCTAssertEqual(activeRunnerStarts, 1)
+
+        await control.beginShutdown()
+        _ = try? await task.value
+    }
+
     func testPoolSlotsUseUniqueNamesAndOneJobBurstLifecycle() throws {
         let vm = Config.VM(
             source: Config.VMSource(type: .oci, image: "ghcr.io/acme/vm:latest", path: nil),

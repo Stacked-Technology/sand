@@ -240,6 +240,7 @@ struct RunnerPool: Sendable {
     func run() async throws {
         precondition(slots.count == config.max)
         var activeIndices = Set<Int>()
+        var recentlyFinishedIndices = Set<Int>()
         var pendingBaselineRestarts = Set<Int>()
         var baselineFailures: [Int: Int] = [:]
         var consecutivePollFailures = 0
@@ -248,6 +249,7 @@ struct RunnerPool: Sendable {
             func startRunner(at index: Int) {
                 let slot = slots[index]
                 activeIndices.insert(index)
+                recentlyFinishedIndices.remove(index)
                 logger.info("pool start runner \(slot.name) (slot \(index + 1)/\(config.max))")
                 group.addTask {
                     let slotID = UUID()
@@ -355,6 +357,7 @@ struct RunnerPool: Sendable {
                         }
                         continue
                     }
+                    recentlyFinishedIndices.insert(index)
                     if let errorDescription {
                         logger.warning("pool burst runner \(slot.name) exited: \(errorDescription)")
                     } else {
@@ -363,25 +366,43 @@ struct RunnerPool: Sendable {
 
                 case let .snapshot(snapshot):
                     consecutivePollFailures = 0
+                    recentlyFinishedIndices = Set(recentlyFinishedIndices.filter {
+                        snapshot.onlineRunnerNames.contains(slots[$0].registrationName)
+                    })
                     for index in 0..<config.min
                         where snapshot.onlineRunnerNames.contains(slots[index].registrationName) {
                         baselineFailures[index] = 0
                     }
+                    let recentlyFinishedRunnerNames = Set(
+                        recentlyFinishedIndices.map { slots[$0].registrationName }
+                    )
+                    let registeredIndices = Set(slots.indices.filter {
+                        snapshot.onlineRunnerNames.contains(slots[$0].registrationName)
+                    })
+                    let suppressedFinishedBusyRunners = snapshot.busyRunnerNames
+                        .intersection(recentlyFinishedRunnerNames)
+                    let effectiveBusyRunners = snapshot.busyRunners - suppressedFinishedBusyRunners.count
+                    let occupiedRegistrationIndices = registeredIndices.subtracting(recentlyFinishedIndices)
+                    let capacityIndices = activeIndices.union(occupiedRegistrationIndices)
                     let desired = RunnerPoolScaler.desiredRunnerCount(
                         minimum: config.min,
                         maximum: config.max,
-                        busyRunners: snapshot.busyRunners,
+                        busyRunners: effectiveBusyRunners,
                         queuedJobs: snapshot.queuedJobs
                     )
                     logger.debug(
                         "pool snapshot queued=\(snapshot.queuedJobs) busy=\(snapshot.busyRunners) " +
-                        "active=\(activeIndices.count) desired=\(desired)"
+                        "effectiveBusy=\(effectiveBusyRunners) active=\(activeIndices.count) " +
+                        "registered=\(registeredIndices.count) capacity=\(capacityIndices.count) " +
+                        "suppressedBusy=\(suppressedFinishedBusyRunners.sorted()) desired=\(desired)"
                     )
 
-                    if desired > activeIndices.count {
-                        let needed = desired - activeIndices.count
+                    if desired > capacityIndices.count {
+                        let needed = desired - capacityIndices.count
                         let inactive = slots.indices.filter {
-                            !activeIndices.contains($0) && !pendingBaselineRestarts.contains($0)
+                            !activeIndices.contains($0) &&
+                            !occupiedRegistrationIndices.contains($0) &&
+                            !pendingBaselineRestarts.contains($0)
                         }
                         for index in inactive.prefix(needed) {
                             startRunner(at: index)
