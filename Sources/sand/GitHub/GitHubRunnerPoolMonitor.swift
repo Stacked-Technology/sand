@@ -5,6 +5,21 @@ struct GitHubRunnerPoolSnapshot: Equatable, Sendable {
     let busyRunners: Int
     let onlineRunnerNames: Set<String>
     let capturedAt: Date
+    let busyRunnerNames: Set<String>
+
+    init(
+        queuedJobs: Int,
+        busyRunners: Int,
+        onlineRunnerNames: Set<String>,
+        capturedAt: Date,
+        busyRunnerNames: Set<String> = []
+    ) {
+        self.queuedJobs = queuedJobs
+        self.busyRunners = busyRunners
+        self.onlineRunnerNames = onlineRunnerNames
+        self.capturedAt = capturedAt
+        self.busyRunnerNames = busyRunnerNames
+    }
 }
 
 enum GitHubRunnerPoolMonitorError: Error, CustomStringConvertible {
@@ -126,7 +141,8 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
             queuedJobs: queued,
             busyRunners: state.busy,
             onlineRunnerNames: state.online,
-            capturedAt: Date()
+            capturedAt: Date(),
+            busyRunnerNames: state.busyNames
         )
     }
 
@@ -231,9 +247,14 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
         return count
     }
 
-    private func registeredRunnerState(token: String) async throws -> (busy: Int, online: Set<String>) {
+    private func registeredRunnerState(token: String) async throws -> (
+        busy: Int,
+        busyNames: Set<String>,
+        online: Set<String>
+    ) {
         var page = 1
         var busy = 0
+        var busyNames = Set<String>()
         var online = Set<String>()
         while true {
             let response: RunnersResponse = try await request(
@@ -252,6 +273,7 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
                 online.insert(runner.name)
                 if runner.busy {
                     busy += 1
+                    busyNames.insert(runner.name)
                 }
             }
             if page * 100 >= response.totalCount || response.runners.isEmpty {
@@ -259,7 +281,7 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
             }
             page += 1
         }
-        return (busy, online)
+        return (busy, busyNames, online)
     }
 
     private func request<T: Decodable>(

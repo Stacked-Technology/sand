@@ -21,6 +21,10 @@ struct Runner: Sendable {
         case invalidMountHostPath(String)
     }
 
+    static func shouldRestartAfterProvisionerCompletion(stopAfter: Int?) -> Bool {
+        stopAfter == nil
+    }
+
     private struct RunnerCacheInfo {
         let hostPath: String
         let name: String
@@ -380,8 +384,12 @@ struct Runner: Sendable {
                 }
                 switch outcome {
                 case .completed:
-                    logger.warning("github provisioner completed; runner exited, restarting VM")
-                    await scheduleRestart(reason: .provisionerExited)
+                    if Self.shouldRestartAfterProvisionerCompletion(stopAfter: config.stopAfter) {
+                        logger.warning("github provisioner completed; runner exited, restarting VM")
+                        await scheduleRestart(reason: .provisionerExited)
+                    } else {
+                        logger.info("github provisioner completed; one-shot runner lifecycle complete")
+                    }
                     await stopHealthCheck(healthCheckTask)
                     await shutdownCoordinator.cleanup(reason: "provisioner exited")
                     return

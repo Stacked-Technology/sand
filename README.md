@@ -217,7 +217,12 @@ runner only after a matching job is queued. `pool.max` must still be at least
 registration, so this mode trades idle memory for cold-start latency. A burst
 runner that is already online is left available when queued demand disappears
 to avoid racing GitHub's runner assignment; it is still limited to one job and
-is destroyed after its lifecycle completes.
+is destroyed after its lifecycle completes. After a one-job runner exits, Sand
+ignores the short-lived stale GitHub busy state for that runner while GitHub
+still reports its registration online, so it does not launch a replacement
+without fresh queued demand. Online runners are also counted as existing
+capacity when Sand starts, preventing a restart or upgrade from treating a
+stale busy registration as new demand.
 
 Pool runners must use organization registration and `ephemeral: true`, and
 `stopAfter` must be omitted. Pool mode also rejects `vm.cache` and all

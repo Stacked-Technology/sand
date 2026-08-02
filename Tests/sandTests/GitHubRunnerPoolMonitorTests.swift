@@ -153,6 +153,7 @@ final class GitHubRunnerPoolMonitorTests: XCTestCase {
         let snapshot = try await monitor.snapshot()
         XCTAssertEqual(snapshot.queuedJobs, 1)
         XCTAssertEqual(snapshot.busyRunners, 1)
+        XCTAssertEqual(snapshot.busyRunnerNames, Set(["runner-pool"]))
         XCTAssertEqual(
             snapshot.onlineRunnerNames,
             Set(["runner-pool", "runner-pool-2"])
