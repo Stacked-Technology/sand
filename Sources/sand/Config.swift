@@ -407,8 +407,10 @@ struct Config: Decodable, Sendable {
             self.min = try container.decodeIfPresent(Int.self, forKey: .min) ?? 1
             self.max = try container.decode(Int.self, forKey: .max)
             self.pollInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .pollInterval) ?? 30
-            self.repositoryScope = try container.decodeIfPresent(RepositoryScope.self, forKey: .repositoryScope) ?? .selected
-            self.repositories = try container.decodeIfPresent([String].self, forKey: .repositories) ?? []
+            let repositories = try container.decodeIfPresent([String].self, forKey: .repositories) ?? []
+            self.repositoryScope = try container.decodeIfPresent(RepositoryScope.self, forKey: .repositoryScope)
+                ?? (repositories.isEmpty ? .organization : .selected)
+            self.repositories = repositories
             self.excludeRepositories = try container.decodeIfPresent([String].self, forKey: .excludeRepositories) ?? []
             self.matchLabels = try container.decode([String].self, forKey: .matchLabels)
         }

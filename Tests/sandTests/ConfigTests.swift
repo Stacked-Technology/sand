@@ -256,4 +256,31 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(pool.repositories, [])
         XCTAssertEqual(pool.excludeRepositories, ["legacy-app"])
     }
+
+    func testDefaultsToOrganizationScopeWhenRepositoryListIsOmitted() throws {
+        let yaml = """
+        runners:
+          - name: runner-pool
+            pool:
+              min: 0
+              max: 2
+              matchLabels: [macos-pool]
+            vm:
+              source:
+                type: oci
+                image: ghcr.io/acme/vm:latest
+            provisioner:
+              type: github
+              config:
+                appId: 42
+                organization: acme
+                privateKeyPath: ~/key.pem
+                runnerName: runner-pool
+                extraLabels: [macos-pool]
+        """
+        let url = try writeTempFile(contents: yaml)
+        let pool = try XCTUnwrap(Config.load(path: url.path).runners.first?.pool)
+        XCTAssertEqual(pool.repositoryScope, .organization)
+        XCTAssertEqual(pool.repositories, [])
+    }
 }

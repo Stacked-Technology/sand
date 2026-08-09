@@ -234,6 +234,11 @@ matching queued jobs, clamped between `min` and `max`. The first runner keeps
 the configured name; additional slots use `runner-pool-2`, `runner-pool-3`,
 and so on.
 
+For compatibility with older configs, an omitted `repositoryScope` is inferred
+as `selected` when `repositories` contains entries and as `organization` when
+the repository list is omitted or empty. New configs should set the scope
+explicitly so the intended access boundary is visible.
+
 Set `pool.min` to `0` for cold-start mode. Sand remains online as the host-side
 dispatcher, starts no guest at launch, and starts the first isolated ephemeral
 runner only after a matching job is queued. `pool.max` must still be at least
