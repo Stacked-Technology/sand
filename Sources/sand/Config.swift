@@ -370,24 +370,35 @@ struct Config: Decodable, Sendable {
         }
     }
 
+    enum RepositoryScope: String, Decodable, Equatable, Sendable {
+        case selected
+        case organization
+    }
+
     struct RunnerPool: Decodable, Sendable {
         let min: Int
         let max: Int
         let pollInterval: TimeInterval
+        let repositoryScope: RepositoryScope
         let repositories: [String]
+        let excludeRepositories: [String]
         let matchLabels: [String]
 
         init(
             min: Int = 1,
             max: Int,
             pollInterval: TimeInterval = 30,
-            repositories: [String],
-            matchLabels: [String]
+            repositories: [String] = [],
+            matchLabels: [String],
+            repositoryScope: RepositoryScope = .selected,
+            excludeRepositories: [String] = []
         ) {
             self.min = min
             self.max = max
             self.pollInterval = pollInterval
+            self.repositoryScope = repositoryScope
             self.repositories = repositories
+            self.excludeRepositories = excludeRepositories
             self.matchLabels = matchLabels
         }
 
@@ -396,7 +407,9 @@ struct Config: Decodable, Sendable {
             self.min = try container.decodeIfPresent(Int.self, forKey: .min) ?? 1
             self.max = try container.decode(Int.self, forKey: .max)
             self.pollInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .pollInterval) ?? 30
-            self.repositories = try container.decode([String].self, forKey: .repositories)
+            self.repositoryScope = try container.decodeIfPresent(RepositoryScope.self, forKey: .repositoryScope) ?? .selected
+            self.repositories = try container.decodeIfPresent([String].self, forKey: .repositories) ?? []
+            self.excludeRepositories = try container.decodeIfPresent([String].self, forKey: .excludeRepositories) ?? []
             self.matchLabels = try container.decode([String].self, forKey: .matchLabels)
         }
 
@@ -404,7 +417,9 @@ struct Config: Decodable, Sendable {
             case min
             case max
             case pollInterval
+            case repositoryScope
             case repositories
+            case excludeRepositories
             case matchLabels
         }
     }

@@ -58,11 +58,14 @@ struct PoolCheck: AsyncParsableCommand {
                 organization: github.organization,
                 repository: nil
             )
+            let configuredRepositories: [String]? = pool.repositoryScope == .organization
+                ? nil
+                : pool.repositories
             try await Self.verifyRegistrationAccess(
                 poolName: runner.name,
                 registrationToken: {
                     try await githubService.runnerRegistrationToken(
-                        installationRepositories: pool.repositories,
+                        installationRepositories: configuredRepositories,
                         installationPermissions: [
                             "organization_self_hosted_runners": "write"
                         ]
@@ -73,9 +76,10 @@ struct PoolCheck: AsyncParsableCommand {
                 auth: auth,
                 session: URLSession.shared,
                 organization: github.organization,
-                repositories: pool.repositories,
+                repositories: configuredRepositories,
                 matchLabels: pool.matchLabels,
-                runnerNames: runnerNames
+                runnerNames: runnerNames,
+                excludedRepositories: pool.excludeRepositories
             )
             let snapshot = try await Self.verifySnapshot(
                 poolName: runner.name,
@@ -102,7 +106,8 @@ struct PoolCheck: AsyncParsableCommand {
                 "Runner pool \(poolName) GitHub preflight failed. " +
                     "Grant the GitHub App repository permission Actions: Read-only, " +
                     "organization permission Self-hosted runners: Read and write, " +
-                    "select every configured repository, and accept the updated " +
+                    "select every configured repository or enable organization-wide " +
+                    "installation access, and accept the updated " +
                     "installation permissions. GitHub returned HTTP \(error.status)."
             )
         }
@@ -120,7 +125,8 @@ struct PoolCheck: AsyncParsableCommand {
                 "Runner pool \(poolName) registration preflight failed. " +
                     "Grant the GitHub App organization permission " +
                     "Self-hosted runners: Read and write, select every configured " +
-                    "repository, and accept the updated installation permissions. " +
+                    "repository or enable organization-wide installation access, " +
+                    "and accept the updated installation permissions. " +
                     "GitHub returned HTTP \(status)."
             )
         }

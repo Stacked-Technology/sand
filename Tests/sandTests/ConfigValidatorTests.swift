@@ -513,6 +513,51 @@ final class ConfigValidatorTests: XCTestCase {
         XCTAssertTrue(issues.isEmpty, "\(issues)")
     }
 
+    func testOrganizationRunnerPoolAllowsExcludedRepositories() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                min: 0,
+                max: 1,
+                pollInterval: 15,
+                matchLabels: ["macos-pool"],
+                repositoryScope: .organization,
+                excludeRepositories: ["legacy-app"]
+            )
+        )
+        let issues = ConfigValidator().validate(Config(runners: [runner]))
+        XCTAssertTrue(issues.isEmpty, "\(issues)")
+    }
+
+    func testOrganizationRunnerPoolRejectsSelectedRepositories() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                max: 1,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"],
+                repositoryScope: .organization
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [runner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains { $0.contains("pool.repositories must be empty when pool.repositoryScope is organization") })
+    }
+
+    func testSelectedRunnerPoolRejectsExcludedRepositories() throws {
+        let runner = try makePoolRunner(
+            pool: Config.RunnerPool(
+                max: 1,
+                repositories: ["mobile"],
+                matchLabels: ["macos-pool"],
+                excludeRepositories: ["legacy-app"]
+            )
+        )
+        let messages = ConfigValidator()
+            .validate(Config(runners: [runner]))
+            .map(\.message)
+        XCTAssertTrue(messages.contains { $0.contains("pool.excludeRepositories requires pool.repositoryScope: organization") })
+    }
+
     func testRunnerPoolRequiresAtLeastOneCapacitySlot() throws {
         let runner = try makePoolRunner(
             pool: Config.RunnerPool(

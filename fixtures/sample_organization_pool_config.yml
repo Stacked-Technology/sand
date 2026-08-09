@@ -1,0 +1,33 @@
+runners:
+  - name: organization-runner-pool
+    vm:
+      source:
+        type: oci
+        image: ghcr.io/cirruslabs/macos-runner:tahoe
+      hardware:
+        audio: false
+      run:
+        noGraphics: true
+        noClipboard: true
+        network: softnet
+        softnetBlock: "@host"
+    provisioner:
+      type: github
+      config:
+        appId: 123456
+        organization: my-org
+        privateKeyPath: ~/my-app.private-key.pem
+        runnerName: organization-runner-pool
+        ephemeral: true
+        extraLabels:
+          - macos-pool
+        runnerGroup: mac-runners
+    pool:
+      min: 0
+      max: 2
+      pollInterval: 30
+      repositoryScope: organization
+      excludeRepositories:
+        - archived-app
+      matchLabels:
+        - macos-pool

@@ -77,6 +77,7 @@ runners:
       min: 1
       max: 2
       pollInterval: 30
+      repositoryScope: selected
       repositories:
         - mobile-app
       matchLabels:
