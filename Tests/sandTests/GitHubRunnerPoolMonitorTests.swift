@@ -23,6 +23,8 @@ final class PoolMonitorSession: URLSessionProtocol, @unchecked Sendable {
             body = #"{"id":1}"#
         case "/app/installations/1/access_tokens":
             body = #"{"token":"installation-token","expires_at":"2099-01-01T00:00:00Z"}"#
+        case "/installation/repositories":
+            body = #"{"total_count":3,"repositories":[{"full_name":"acme/mobile"},{"full_name":"acme/legacy"},{"full_name":"other-org/ignored"}]}"#
         case "/repos/acme/mobile/actions/runs" where status == "queued":
             body = #"{"total_count":1,"workflow_runs":[{"id":10}]}"#
         case "/repos/acme/mobile/actions/runs" where status == "in_progress":
@@ -194,6 +196,40 @@ final class GitHubRunnerPoolMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.busyRunners, 0)
         XCTAssertEqual(snapshot.onlineRunnerNames, [])
         XCTAssertEqual(session.issuedTokenCount, 2)
+    }
+
+    func testOrganizationScopeDiscoversInstallationRepositoriesAndOmitsRepositoryRestriction() async throws {
+        let session = PoolMonitorSession()
+        let monitor = GitHubRunnerPoolMonitor(
+            auth: MockAuth(),
+            session: session,
+            organization: "acme",
+            repositories: nil,
+            matchLabels: ["macos-pool", "release"],
+            runnerNames: ["runner-pool", "runner-pool-2"],
+            excludedRepositories: ["legacy"]
+        )
+
+        let snapshot = try await monitor.snapshot()
+
+        XCTAssertEqual(snapshot.queuedJobs, 1)
+        XCTAssertTrue(session.requests.contains { $0.url?.path == "/installation/repositories" })
+        XCTAssertFalse(session.requests.contains { $0.url?.path == "/repos/acme/legacy/actions/runs" })
+        let tokenRequest = try XCTUnwrap(session.requests.first {
+            $0.url?.path == "/app/installations/1/access_tokens"
+        })
+        let tokenBody = try XCTUnwrap(tokenRequest.httpBody)
+        let tokenJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: tokenBody) as? [String: Any]
+        )
+        XCTAssertNil(tokenJSON["repositories"])
+        XCTAssertEqual(
+            tokenJSON["permissions"] as? [String: String],
+            [
+                "actions": "read",
+                "organization_self_hosted_runners": "read"
+            ]
+        )
     }
 
     func testTokenCreationRefreshesAStaleInstallationIDOnce() async throws {

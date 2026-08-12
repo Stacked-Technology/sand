@@ -187,8 +187,14 @@ final class ConfigValidator {
         if pool.pollInterval < 15 {
             issues.append(.init(severity: .error, message: "pool.pollInterval must be at least 15 seconds."))
         }
-        if pool.repositories.isEmpty {
-            issues.append(.init(severity: .error, message: "pool.repositories must contain at least one repository."))
+        if pool.repositoryScope == .selected && pool.repositories.isEmpty {
+            issues.append(.init(severity: .error, message: "pool.repositories must contain at least one repository when pool.repositoryScope is selected."))
+        }
+        if pool.repositoryScope == .organization && !pool.repositories.isEmpty {
+            issues.append(.init(severity: .error, message: "pool.repositories must be empty when pool.repositoryScope is organization."))
+        }
+        if pool.repositoryScope == .selected && !pool.excludeRepositories.isEmpty {
+            issues.append(.init(severity: .error, message: "pool.excludeRepositories requires pool.repositoryScope: organization."))
         }
         var seenRepositories = Set<String>()
         for repository in pool.repositories {
@@ -207,6 +213,26 @@ final class ConfigValidator {
                 issues.append(.init(
                     severity: .error,
                     message: "pool.repositories must not contain duplicates: \(trimmed)."
+                ))
+            }
+        }
+        var seenExcludedRepositories = Set<String>()
+        for repository in pool.excludeRepositories {
+            let trimmed = repository.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.contains("/") {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.excludeRepositories entries must be non-empty repository names without '/'."
+                ))
+            } else if trimmed != repository {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.excludeRepositories entries must not contain surrounding whitespace."
+                ))
+            } else if !seenExcludedRepositories.insert(trimmed).inserted {
+                issues.append(.init(
+                    severity: .error,
+                    message: "pool.excludeRepositories must not contain duplicates: \(trimmed)."
                 ))
             }
         }

@@ -144,13 +144,17 @@ struct Run: AsyncParsableCommand {
                 appId: githubConfig.appId,
                 privateKeyPath: githubConfig.privateKeyPath
             )
+            let configuredRepositories: [String]? = poolConfig.repositoryScope == .organization
+                ? nil
+                : poolConfig.repositories
             let monitor = GitHubRunnerPoolMonitor(
                 auth: auth,
                 session: URLSession.shared,
                 organization: githubConfig.organization,
-                repositories: poolConfig.repositories,
+                repositories: configuredRepositories,
                 matchLabels: poolConfig.matchLabels,
-                runnerNames: poolRunnerNames
+                runnerNames: poolRunnerNames,
+                excludedRepositories: poolConfig.excludeRepositories
             )
             let poolControl = RunnerPoolControl()
             poolControls.append(poolControl)

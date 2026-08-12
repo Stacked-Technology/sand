@@ -70,6 +70,15 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
         let id: Int64
     }
 
+    private struct InstallationRepositoriesResponse: Decodable {
+        let totalCount: Int
+        let repositories: [InstallationRepository]
+    }
+
+    private struct InstallationRepository: Decodable {
+        let fullName: String
+    }
+
     private struct WorkflowJobsResponse: Decodable {
         let totalCount: Int
         let jobs: [WorkflowJob]
@@ -100,25 +109,30 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
     private let auth: GitHubAuthenticating
     private let session: URLSessionProtocol
     private let organization: String
-    private let repositories: [String]
+    private let repositories: [String]?
+    private let excludedRepositories: Set<String>
     private let matchLabels: Set<String>
     private let runnerNames: Set<String>
     private let baseURL = URL(string: "https://api.github.com")!
     private var cachedInstallationID: Int?
     private var cachedToken: CachedToken?
+    private var cachedOrganizationRepositories: [String]?
+    private var cachedOrganizationRepositoriesAt: Date?
 
     init(
         auth: GitHubAuthenticating,
         session: URLSessionProtocol,
         organization: String,
-        repositories: [String],
+        repositories: [String]? = nil,
         matchLabels: [String],
-        runnerNames: Set<String>
+        runnerNames: Set<String>,
+        excludedRepositories: [String] = []
     ) {
         self.auth = auth
         self.session = session
         self.organization = organization
         self.repositories = repositories
+        self.excludedRepositories = Set(excludedRepositories.map { $0.lowercased() })
         self.matchLabels = Set(matchLabels)
         self.runnerNames = runnerNames
     }
@@ -166,13 +180,16 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
         let appToken = try auth.token(now: Date())
         let response: AccessTokenResponse
         do {
-            let requestBody = try JSONSerialization.data(withJSONObject: [
-                "repositories": repositories,
+            var payload: [String: Any] = [
                 "permissions": [
                     "actions": "read",
                     "organization_self_hosted_runners": "read"
                 ]
-            ])
+            ]
+            if let repositories {
+                payload["repositories"] = repositories
+            }
+            let requestBody = try JSONSerialization.data(withJSONObject: payload)
             response = try await request(
                 path: "/app/installations/\(installationID)/access_tokens",
                 method: "POST",
@@ -193,6 +210,7 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
     }
 
     private func matchingQueuedJobs(token: String) async throws -> Int {
+        let repositories = try await monitoredRepositories(token: token)
         var runIDsByRepository: [String: Set<Int64>] = [:]
         for repository in repositories {
             var runIDs = Set<Int64>()
@@ -245,6 +263,55 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
             }
         }
         return count
+    }
+
+    private func monitoredRepositories(token: String) async throws -> [String] {
+        let repositories: [String]
+        if let configuredRepositories = self.repositories {
+            repositories = configuredRepositories
+        } else {
+            repositories = try await organizationRepositories(token: token)
+        }
+        return repositories.filter { !excludedRepositories.contains($0.lowercased()) }
+    }
+
+    private func organizationRepositories(token: String) async throws -> [String] {
+        if let cachedOrganizationRepositories,
+           let cachedAt = cachedOrganizationRepositoriesAt,
+           Date().timeIntervalSince(cachedAt) < 60 {
+            return cachedOrganizationRepositories
+        }
+
+        var repositories = Set<String>()
+        var page = 1
+        let organizationPrefix = "\(organization.lowercased())/"
+        while true {
+            let response: InstallationRepositoriesResponse = try await request(
+                path: "/installation/repositories",
+                method: "GET",
+                token: token,
+                queryItems: [
+                    URLQueryItem(name: "per_page", value: "100"),
+                    URLQueryItem(name: "page", value: String(page))
+                ]
+            )
+            for repository in response.repositories {
+                let fullName = repository.fullName
+                guard fullName.lowercased().hasPrefix(organizationPrefix) else {
+                    continue
+                }
+                repositories.insert(String(fullName.dropFirst(organizationPrefix.count)))
+            }
+            if page * 100 >= response.totalCount || response.repositories.isEmpty {
+                break
+            }
+            page += 1
+        }
+
+        let resolvedRepositories = repositories.sorted()
+        cachedOrganizationRepositories = resolvedRepositories
+        cachedOrganizationRepositoriesAt = Date()
+        return resolvedRepositories
     }
 
     private func registeredRunnerState(token: String) async throws -> (

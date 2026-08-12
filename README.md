@@ -113,8 +113,8 @@ Create a `config.yml` and run the CLI with `--config`.
 ### GitHub Actions setup
 
 1) Create a GitHub App and grant `Self-hosted runners` permission set to `Read & Write` at the organization level. Runner pools also require repository `Actions` permission set to `Read-only`. https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app
-2) Install the app on the organization or the specific repository you want to run against.
-3) Download the private key and set `appId`, `organization`, `repository` (optional), and `privateKeyPath` in your config.
+2) Install the app on the organization. An organization-wide pool needs the installation's repository selection set to `all`; a selected pool can use a selected-repository installation.
+3) Download the private key and set `appId`, `organization`, `privateKeyPath`, and an organization-level `runnerGroup` in your config. Omit `repository` for pools.
 
 ### GitHub Actions runner provisioner
 ```
@@ -197,6 +197,7 @@ runners:
       min: 1
       max: 2
       pollInterval: 30
+      repositoryScope: selected
       repositories:
         - mobile-app
       matchLabels:
@@ -204,11 +205,39 @@ runners:
         - release
 ```
 
-Sand polls only the listed repositories and counts queued jobs containing every
+`repositoryScope: selected` preserves the original explicit allowlist behavior:
+Sand polls only `pool.repositories` and counts queued jobs containing every
+`matchLabels` entry. This is useful when a runner must stay limited to a small
+set of repositories.
+
+For an organization-wide pool, omit the repository list and set the scope
+explicitly:
+
+```yaml
+pool:
+  min: 0
+  max: 2
+  pollInterval: 30
+  repositoryScope: organization
+  excludeRepositories:
+    - archived-app
+  matchLabels:
+    - macos-pool
+    - release
+```
+
+Organization scope discovers repositories available to the installed GitHub
+App automatically. `excludeRepositories` is optional and is matched by
+repository name. In both scopes, Sand only counts queued jobs containing every
 `matchLabels` entry. Desired capacity is the number of busy pool runners plus
 matching queued jobs, clamped between `min` and `max`. The first runner keeps
 the configured name; additional slots use `runner-pool-2`, `runner-pool-3`,
 and so on.
+
+For compatibility with older configs, an omitted `repositoryScope` is inferred
+as `selected` when `repositories` contains entries and as `organization` when
+the repository list is omitted or empty. New configs should set the scope
+explicitly so the intended access boundary is visible.
 
 Set `pool.min` to `0` for cold-start mode. Sand remains online as the host-side
 dispatcher, starts no guest at launch, and starts the first isolated ephemeral
@@ -238,7 +267,8 @@ job during teardown. It accepts the next matching job, then destroys its VM
 and returns the pool to its warm minimum.
 
 Before starting a pool, verify that its GitHub App installation can inspect
-the configured repositories, queued Actions jobs, and organization runners:
+the selected or organization-wide repository scope, queued Actions jobs, and
+organization runners:
 
 ```sh
 sand pool-check --config sand.yml
@@ -246,8 +276,8 @@ sand pool-check --config sand.yml
 
 This live check fails with permission guidance when the App is missing
 repository `Actions: Read-only`, organization `Self-hosted runners: Read and
-write`, an explicitly configured repository, or acceptance of updated
-installation permissions.
+write`, access to the selected repositories or organization installation
+scope, or acceptance of updated installation permissions.
 
 Common pitfalls:
 - `vm.cache.host` must be a directory (missing paths are created; file paths are rejected).
