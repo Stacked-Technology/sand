@@ -60,15 +60,17 @@ struct Runner: Sendable {
         self.vmLogger = Logger(label: "vm.\(logLabel)", minimumLevel: logLevel, sink: logSink)
     }
 
-    func run() async throws {
+    func run(lifecycle: RunnerLifecycleContext? = nil) async throws {
         try Task.checkCancellation()
+        var nextLifecycle = lifecycle
         if let stopAfter = config.stopAfter {
             guard stopAfter > 0 else {
                 return
             }
             for _ in 0..<stopAfter {
                 do {
-                    try await runOnce()
+                    try await runOnce(lifecycle: nextLifecycle)
+                    nextLifecycle = nil
                 } catch {
                     logger.error("runOnce failed (vm=\(vmName)): \(String(describing: error))")
                     throw error
@@ -78,7 +80,8 @@ struct Runner: Sendable {
         }
         while true {
             do {
-                try await runOnce()
+                try await runOnce(lifecycle: nextLifecycle)
+                nextLifecycle = nil
             } catch {
                 logger.error("runOnce failed (vm=\(vmName)): \(String(describing: error))")
                 throw error
@@ -86,8 +89,22 @@ struct Runner: Sendable {
         }
     }
 
-    private func runOnce() async throws {
+    private func runOnce(lifecycle: RunnerLifecycleContext? = nil) async throws {
         try Task.checkCancellation()
+        let lifecycle = lifecycle ?? RunnerLifecycleContext(
+            vmName: vmName,
+            runnerName: config.provisioner.github?.runnerName ?? vmName
+        )
+        logger.info(
+            "lifecycle event=runner_lifecycle_start \(lifecycle.metadata()) "
+                + "\(lifecycle.timing.startMetadata())"
+        )
+        defer {
+            logger.info(
+                "lifecycle event=runner_lifecycle_end \(lifecycle.metadata()) "
+                    + "\(lifecycle.timing.completionMetadata())"
+            )
+        }
         let stopAfterLabel = config.stopAfter.map(String.init) ?? "nil"
         logger.debug("runOnce start (vm=\(vmName), stopAfter=\(stopAfterLabel))")
         try await applyRestartBackoffIfNeeded()
@@ -97,27 +114,37 @@ struct Runner: Sendable {
         let provisionerConfig = config.provisioner
         let source = vm.source.resolvedSource
         logger.info("prepare source \(source)")
+        let prepareTiming = logLifecyclePhaseStart("prepare", lifecycle)
         do {
             try await tart.prepare(source: source)
+            logLifecyclePhaseComplete("prepare", lifecycle, timing: prepareTiming)
         } catch {
+            logLifecyclePhaseFailed("prepare", lifecycle, timing: prepareTiming)
             logger.error("prepare source \(source) failed: \(String(describing: error))")
             throw error
         }
         try Task.checkCancellation()
+        let preflightTiming = logLifecyclePhaseStart("preflight_cleanup", lifecycle)
         do {
             if try await tart.isRunning(name: name) {
                 logger.info("VM \(name) already running, stopping before boot")
                 try await tart.stop(name: name)
             }
+            logLifecyclePhaseComplete("preflight_cleanup", lifecycle, timing: preflightTiming)
         } catch is CancellationError {
+            logLifecyclePhaseFailed("preflight_cleanup", lifecycle, timing: preflightTiming)
             throw CancellationError()
         } catch {
+            logLifecyclePhaseFailed("preflight_cleanup", lifecycle, timing: preflightTiming)
             logger.warning("preflight cleanup failed: \(String(describing: error))")
         }
         logger.info("clone VM \(name) from \(source)")
+        let cloneTiming = logLifecyclePhaseStart("clone", lifecycle)
         do {
             try await tart.clone(source: source, name: name)
+            logLifecyclePhaseComplete("clone", lifecycle, timing: cloneTiming)
         } catch {
+            logLifecyclePhaseFailed("clone", lifecycle, timing: cloneTiming)
             logger.error("clone VM \(name) from \(source) failed: \(String(describing: error))")
             if Task.isCancelled {
                 await CancellationResistantCleanup.run {
@@ -126,16 +153,19 @@ struct Runner: Sendable {
             }
             throw error
         }
-        await shutdownCoordinator.activate(name: name)
+        await shutdownCoordinator.activate(name: name, lifecycle: lifecycle)
         do {
             try Task.checkCancellation()
         } catch {
             await shutdownCoordinator.cleanup(reason: "runner task cancelled after clone")
             throw error
         }
+        let vmConfigTiming = logLifecyclePhaseStart("vm_config", lifecycle)
         do {
             try await applyVMConfigIfNeeded(name: name, vm: vm)
+            logLifecyclePhaseComplete("vm_config", lifecycle, timing: vmConfigTiming)
         } catch {
+            logLifecyclePhaseFailed("vm_config", lifecycle, timing: vmConfigTiming, level: .error)
             await shutdownCoordinator.cleanup(reason: "apply VM config failed")
             throw error
         }
@@ -154,6 +184,7 @@ struct Runner: Sendable {
         )
         logRunOptions(name: name, options: runOptions)
         logger.info("boot VM \(name)")
+        let bootTiming = logLifecyclePhaseStart("boot", lifecycle, level: .info)
         let vmRunSession: Tart.RunSession
         do {
             vmRunSession = try await tart.run(
@@ -162,7 +193,9 @@ struct Runner: Sendable {
                 deferSoftnetBlock: provisionerConfig.type == .github
                     && vm.run.softnetBlock != nil
             )
+            logLifecyclePhaseComplete("boot", lifecycle, timing: bootTiming, level: .info)
         } catch {
+            logLifecyclePhaseFailed("boot", lifecycle, timing: bootTiming, level: .error)
             logger.error("tart run failed for \(name): \(String(describing: error))")
             await shutdownCoordinator.cleanup(reason: "tart run failed")
             throw error
@@ -172,7 +205,8 @@ struct Runner: Sendable {
         let startupOutcome = await waitForVMReady(
             name: name,
             vm: vm,
-            runHandle: vmRunHandle
+            runHandle: vmRunHandle,
+            lifecycle: lifecycle
         )
         let ssh: SSHClient
         switch startupOutcome {
@@ -186,9 +220,12 @@ struct Runner: Sendable {
         }
         let guestAgentReadiness: Tart.GuestAgentReadiness?
         if vmRunSession.policyControl != nil {
+            let guestAgentTiming = logLifecyclePhaseStart("guest_agent_preflight", lifecycle)
             do {
                 guestAgentReadiness = try await tart.verifyGuestAgent(name: name)
+                logLifecyclePhaseComplete("guest_agent_preflight", lifecycle, timing: guestAgentTiming)
             } catch {
+                logLifecyclePhaseFailed("guest_agent_preflight", lifecycle, timing: guestAgentTiming, level: .error)
                 logger.error(
                     "Tart guest-agent preflight failed before runner registration: "
                         + String(describing: error)
@@ -208,7 +245,8 @@ struct Runner: Sendable {
             provisionerConfig: provisionerConfig,
             policyControl: vmRunSession.policyControl,
             deferredBlockTargets: vmRunSession.deferredBlockTargets,
-            guestAgentReadiness: guestAgentReadiness
+            guestAgentReadiness: guestAgentReadiness,
+            lifecycle: lifecycle
         )
     }
 
@@ -220,10 +258,12 @@ struct Runner: Sendable {
         provisionerConfig: Config.Provisioner,
         policyControl: SoftnetPolicyControl?,
         deferredBlockTargets: [String],
-        guestAgentReadiness: Tart.GuestAgentReadiness?
+        guestAgentReadiness: Tart.GuestAgentReadiness?,
+        lifecycle: RunnerLifecycleContext
     ) async throws {
         if let guestDNS = vm.run.guestDNS {
             logger.info("configure guest DNS before network isolation")
+            let guestDNSTiming = logLifecyclePhaseStart("guest_dns", lifecycle, level: .info)
             let command = GuestDNSConfigurator.configurationCommand(
                 for: guestDNS
             )
@@ -238,7 +278,9 @@ struct Runner: Sendable {
                     logIfNonEmpty(label: "stderr", text: result.stderr)
                 }
                 logger.info("guest DNS configured")
+                logLifecyclePhaseComplete("guest_dns", lifecycle, timing: guestDNSTiming, level: .info)
             } catch {
+                logLifecyclePhaseFailed("guest_dns", lifecycle, timing: guestDNSTiming, level: .error)
                 if await handleStageFailure(
                     error,
                     stage: "guestDNS",
@@ -253,6 +295,7 @@ struct Runner: Sendable {
         }
         if let preRun = config.preRun {
             logger.info("run preRun")
+            let preRunTiming = logLifecyclePhaseStart("pre_run", lifecycle, level: .info)
             logScript(preRun)
             do {
                 let result = try await execWithRetry(command: preRun, ssh: ssh, stage: "preRun")
@@ -261,7 +304,9 @@ struct Runner: Sendable {
                     logIfNonEmpty(label: "stderr", text: result.stderr)
                 }
                 logger.info("preRun finished")
+                logLifecyclePhaseComplete("pre_run", lifecycle, timing: preRunTiming, level: .info)
             } catch {
+                logLifecyclePhaseFailed("pre_run", lifecycle, timing: preRunTiming, level: .error)
                 if await handleStageFailure(error, stage: "preRun", healthCheckState: nil) {
                     await shutdownCoordinator.cleanup(reason: "preRun failed")
                     return
@@ -279,6 +324,18 @@ struct Runner: Sendable {
             control: control,
             state: healthCheckState
         )
+        var githubProvisionerTiming: LifecycleTiming?
+        var githubProvisionerOutcomeLogged = false
+        defer {
+            if let githubProvisionerTiming, !githubProvisionerOutcomeLogged {
+                logLifecyclePhaseFailed(
+                    "github_provisioner",
+                    lifecycle,
+                    timing: githubProvisionerTiming,
+                    level: .error
+                )
+            }
+        }
         await control.setHealthCheckTask(healthCheckTask)
         func stopHealthCheck(_ task: Task<Void, Never>) async {
             logger.debug("healthCheck task cancel requested")
@@ -293,7 +350,19 @@ struct Runner: Sendable {
                     throw RunnerError.missingScript
                 }
                 logger.info("run script provisioner")
-                let outcome = await runProvisionerCommands([run], ssh: ssh, healthCheckState: healthCheckState)
+                let provisionerTiming = logLifecyclePhaseStart("script_provisioner", lifecycle, level: .info)
+                let outcome = await runProvisionerCommands(
+                    [run],
+                    ssh: ssh,
+                    healthCheckState: healthCheckState,
+                    lifecycle: lifecycle
+                )
+                logProvisionerSequenceOutcome(
+                    outcome,
+                    phase: "script_provisioner",
+                    lifecycle: lifecycle,
+                    timing: provisionerTiming
+                )
                 switch outcome {
                 case .completed:
                     logger.info("script provisioner finished")
@@ -317,14 +386,34 @@ struct Runner: Sendable {
                     throw RunnerError.missingGitHub
                 }
                 logger.info("run github provisioner")
-                let token = try await github.runnerRegistrationToken()
-                let runnerVersion = try await resolveRunnerVersion(cacheInfo: runnerCacheInfo)
+                let provisionerTiming = logLifecyclePhaseStart("github_provisioner", lifecycle, level: .info)
+                githubProvisionerTiming = provisionerTiming
+                let tokenTiming = logLifecyclePhaseStart("github_registration_token", lifecycle)
+                let token: String
+                do {
+                    token = try await github.runnerRegistrationToken()
+                    logLifecyclePhaseComplete("github_registration_token", lifecycle, timing: tokenTiming)
+                } catch {
+                    logLifecyclePhaseFailed("github_registration_token", lifecycle, timing: tokenTiming, level: .warning)
+                    throw error
+                }
+                let runnerVersionTiming = logLifecyclePhaseStart("runner_version", lifecycle)
+                let runnerVersion: String
+                do {
+                    runnerVersion = try await resolveRunnerVersion(cacheInfo: runnerCacheInfo)
+                    logLifecyclePhaseComplete("runner_version", lifecycle, timing: runnerVersionTiming)
+                } catch {
+                    logLifecyclePhaseFailed("runner_version", lifecycle, timing: runnerVersionTiming, level: .warning)
+                    throw error
+                }
                 if let runnerCacheInfo {
+                    let cacheTiming = logLifecyclePhaseStart("runner_cache_preseed", lifecycle)
                     await preseedRunnerCacheIfPossible(
                         cacheInfo: runnerCacheInfo,
                         ssh: ssh,
                         runnerVersion: runnerVersion
                     )
+                    logLifecyclePhaseComplete("runner_cache_preseed", lifecycle, timing: cacheTiming)
                 }
                 let plan = provisioner.script(
                     config: githubConfig,
@@ -335,14 +424,16 @@ struct Runner: Sendable {
                 var outcome = await runProvisionerCommands(
                     plan.setupCommands,
                     ssh: ssh,
-                    healthCheckState: healthCheckState
+                    healthCheckState: healthCheckState,
+                    lifecycle: lifecycle
                 )
                 if case .completed = outcome {
                     if policyControl == nil {
                         outcome = await runProvisionerCommands(
                             [plan.runnerCommand],
                             ssh: ssh,
-                            healthCheckState: healthCheckState
+                            healthCheckState: healthCheckState,
+                            lifecycle: lifecycle
                         )
                     } else {
                         guard let policyControl,
@@ -354,6 +445,7 @@ struct Runner: Sendable {
                         logger.info(
                             "cut over GitHub runner control from SSH to Tart guest agent"
                         )
+                        let runnerTiming = logLifecyclePhaseStart("runner_process", lifecycle, level: .info)
                         do {
                             let runnerHandle = try await tart.startIsolatedCommand(
                                 readiness: guestAgentReadiness,
@@ -362,7 +454,12 @@ struct Runner: Sendable {
                                     GuestDNSConfigurator.probeCommand
                                 ),
                                 policyControl: policyControl,
-                                blockTargets: deferredBlockTargets
+                                blockTargets: deferredBlockTargets,
+                                outputHandler: RunnerOutputObserver(
+                                    logger: logger,
+                                    lifecycle: lifecycle,
+                                    timing: runnerTiming
+                                ).observe
                             )
                             let isolatedHealthCheckState = HealthCheckState()
                             healthCheckTask = startTartExecHealthCheck(
@@ -375,13 +472,23 @@ struct Runner: Sendable {
                             outcome = await runProvisionerHandle(
                                 runnerHandle,
                                 command: plan.runnerCommand,
-                                healthCheckState: isolatedHealthCheckState
+                                healthCheckState: isolatedHealthCheckState,
+                                lifecycle: lifecycle,
+                                timing: runnerTiming
                             )
                         } catch {
+                            logLifecyclePhaseFailed("runner_process", lifecycle, timing: runnerTiming, level: .error)
                             outcome = .failed(error)
                         }
                     }
                 }
+                logProvisionerSequenceOutcome(
+                    outcome,
+                    phase: "github_provisioner",
+                    lifecycle: lifecycle,
+                    timing: provisionerTiming
+                )
+                githubProvisionerOutcomeLogged = true
                 switch outcome {
                 case .completed:
                     if Self.shouldRestartAfterProvisionerCompletion(stopAfter: config.stopAfter) {
@@ -421,6 +528,7 @@ struct Runner: Sendable {
         }
         if let postRun = config.postRun {
             logger.info("run postRun")
+            let postRunTiming = logLifecyclePhaseStart("post_run", lifecycle, level: .info)
             logScript(postRun)
             do {
                 let result = try await execWithRetry(command: postRun, ssh: ssh, stage: "postRun")
@@ -429,7 +537,9 @@ struct Runner: Sendable {
                     logIfNonEmpty(label: "stderr", text: result.stderr)
                 }
                 logger.info("postRun finished")
+                logLifecyclePhaseComplete("post_run", lifecycle, timing: postRunTiming, level: .info)
             } catch {
+                logLifecyclePhaseFailed("post_run", lifecycle, timing: postRunTiming, level: .error)
                 if await handleStageFailure(error, stage: "postRun", healthCheckState: healthCheckState) {
                     await stopHealthCheck(healthCheckTask)
                     await shutdownCoordinator.cleanup(reason: "postRun failed")
@@ -455,26 +565,32 @@ struct Runner: Sendable {
     private func waitForVMReady(
         name: String,
         vm: Config.VM,
-        runHandle: ProcessHandle
+        runHandle: ProcessHandle,
+        lifecycle: RunnerLifecycleContext
     ) async -> VMStartupOutcome {
-        await withTaskGroup(of: VMStartupOutcome.self) { group in
+        let startupTiming = logLifecyclePhaseStart("vm_ready", lifecycle, level: .info)
+        return await withTaskGroup(of: VMStartupOutcome.self) { group in
             group.addTask {
                 self.logger.info("wait for VM IP")
+                let ipTiming = self.logLifecyclePhaseStart("vm_ip", lifecycle)
                 do {
                     let ip = try await self.resolveIP(name: name)
                     self.logger.info("VM IP \(ip)")
+                    self.logLifecyclePhaseComplete("vm_ip", lifecycle, timing: ipTiming)
                     let ssh = SSHClient(
                         processRunner: self.tart.processRunner,
                         host: ip,
                         config: vm.ssh
                     )
-                    guard await self.waitForSSH(ssh: ssh) else {
+                    guard await self.waitForSSH(ssh: ssh, lifecycle: lifecycle) else {
                         return .failed(.sshNotReady)
                     }
                     return .ready(ssh)
                 } catch is CancellationError {
+                    self.logLifecyclePhaseFailed("vm_ip", lifecycle, timing: ipTiming)
                     return .failed(.stageFailed("VM startup"))
                 } catch {
+                    self.logLifecyclePhaseFailed("vm_ip", lifecycle, timing: ipTiming)
                     self.logger.warning(
                         "resolve VM IP failed; scheduling restart: \(String(describing: error))"
                     )
@@ -499,9 +615,16 @@ struct Runner: Sendable {
             }
 
             guard let first = await group.next() else {
-                return .failed(.stageFailed("VM startup"))
+                self.logLifecyclePhaseFailed("vm_ready", lifecycle, timing: startupTiming)
+                return VMStartupOutcome.failed(.stageFailed("VM startup"))
             }
             group.cancelAll()
+            switch first {
+            case .ready:
+                self.logLifecyclePhaseComplete("vm_ready", lifecycle, timing: startupTiming, level: .info)
+            case .failed:
+                self.logLifecyclePhaseFailed("vm_ready", lifecycle, timing: startupTiming, level: .warning)
+            }
             return first
         }
     }
@@ -637,7 +760,11 @@ struct Runner: Sendable {
         }
     }
 
-    private func waitForSSH(ssh: SSHClient) async -> Bool {
+    private func waitForSSH(
+        ssh: SSHClient,
+        lifecycle: RunnerLifecycleContext
+    ) async -> Bool {
+        let timing = logLifecyclePhaseStart("ssh_ready", lifecycle, level: .info)
         var attempt = 0
         var stoppedChecks = 0
         let maxRetries = ssh.config.connectMaxRetries
@@ -651,6 +778,7 @@ struct Runner: Sendable {
                 let statusErrorLabel = lastStatusError ?? "none"
                 let sshErrorLabel = lastSSHError ?? "none"
                 logger.warning("SSH not ready after \(maxRetries) attempts (lastStatus=\(statusLabel), statusError=\(statusErrorLabel), sshError=\(sshErrorLabel)), restarting VM")
+                logLifecyclePhaseFailed("ssh_ready", lifecycle, timing: timing, level: .warning)
                 return false
             }
             attempt += 1
@@ -663,17 +791,20 @@ struct Runner: Sendable {
                     let reason = status == .missing ? "missing" : "stopped"
                     if status == .missing {
                         logger.warning("VM \(vmName) not running (\(reason)) while waiting for SSH (attempt \(attempt)), restarting VM")
+                        logLifecyclePhaseFailed("ssh_ready", lifecycle, timing: timing, level: .warning)
                         return false
                     }
                     stoppedChecks += 1
                     if stoppedChecks >= 5 {
                         logger.warning("VM \(vmName) not running (\(reason)) after \(stoppedChecks) checks, restarting VM")
+                        logLifecyclePhaseFailed("ssh_ready", lifecycle, timing: timing, level: .warning)
                         return false
                     }
                     logger.info("VM \(vmName) not running (\(reason)) while waiting for SSH (attempt \(attempt)), retrying")
                     do {
                         try await Task.sleep(nanoseconds: 1_000_000_000)
                     } catch {
+                        logLifecyclePhaseFailed("ssh_ready", lifecycle, timing: timing, level: .warning)
                         return false
                     }
                     continue
@@ -687,6 +818,7 @@ struct Runner: Sendable {
                 stoppedChecks = 0
                 lastSSHError = nil
                 logger.info("SSH ready after \(attempt) attempt(s)")
+                logLifecyclePhaseComplete("ssh_ready", lifecycle, timing: timing, level: .info)
                 return true
             } catch {
                 lastSSHError = String(describing: error)
@@ -699,6 +831,7 @@ struct Runner: Sendable {
                 do {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                 } catch {
+                    logLifecyclePhaseFailed("ssh_ready", lifecycle, timing: timing, level: .warning)
                     return false
                 }
             }
@@ -951,10 +1084,16 @@ struct Runner: Sendable {
     private func runProvisionerCommands(
         _ commands: [String],
         ssh: SSHClient,
-        healthCheckState: HealthCheckState
+        healthCheckState: HealthCheckState,
+        lifecycle: RunnerLifecycleContext
     ) async -> ProvisionerSequenceOutcome {
         for command in commands {
-            let outcome = await runProvisionerCommand(command, ssh: ssh, healthCheckState: healthCheckState)
+            let outcome = await runProvisionerCommand(
+                command,
+                ssh: ssh,
+                healthCheckState: healthCheckState,
+                lifecycle: lifecycle
+            )
             switch outcome {
             case .completed:
                 continue
@@ -970,18 +1109,34 @@ struct Runner: Sendable {
     private func runProvisionerCommand(
         _ command: String,
         ssh: SSHClient,
-        healthCheckState: HealthCheckState
+        healthCheckState: HealthCheckState,
+        lifecycle: RunnerLifecycleContext
     ) async -> ProvisionerOutcome {
         let logRedactor = ProvisionerLogRedactor(command: command)
         let redactedCommand = logRedactor.redact(command)
         logScript(redactedCommand)
         var attempt = 0
         while true {
+            let commandTiming = logLifecyclePhaseStart(
+                isRunnerCommand(command) ? "runner_process" : "provisioner_command",
+                lifecycle,
+                level: isRunnerCommand(command) ? .info : .debug
+            )
             do {
                 let commandLabel = commandSummary(redactedCommand)
                 let labeledCommand = commandLabel.isEmpty ? "provisioner command" : "provisioner command (\(commandLabel))"
                 logger.debug("\(labeledCommand) starting (attempt \(attempt + 1))")
-                let handle = try ssh.start(command: command)
+                let outputObserver: ProcessOutputHandler?
+                if isRunnerCommand(command) {
+                    outputObserver = RunnerOutputObserver(
+                        logger: logger,
+                        lifecycle: lifecycle,
+                        timing: commandTiming
+                    ).observe
+                } else {
+                    outputObserver = nil
+                }
+                let handle = try ssh.start(command: command, outputHandler: outputObserver)
                 await control.setProvisioningHandle(handle)
                 logger.debug("\(labeledCommand) started; awaiting completion or healthCheck failure")
                 let outcome = await awaitProvisionerCommand(handle: handle, healthCheckState: healthCheckState)
@@ -994,12 +1149,24 @@ struct Runner: Sendable {
                     logCacheStatusIfPresent(output: logRedactor.redact(result.stdout))
                     let completionLabel = commandLabel.isEmpty ? "provisioner command" : "provisioner command (\(commandLabel))"
                     logger.info("\(completionLabel) completed with exit code \(result.exitCode)")
+                    logLifecyclePhaseComplete(
+                        isRunnerCommand(command) ? "runner_process" : "provisioner_command",
+                        lifecycle,
+                        timing: commandTiming,
+                        level: isRunnerCommand(command) ? .info : .debug
+                    )
                     if isRunnerCommand(command) {
                         logger.warning("github runner exited with code \(result.exitCode)")
                     }
                     await control.clearProvisioningHandle(handle)
                     return .completed(result)
                 case let .failed(error):
+                    logLifecyclePhaseFailed(
+                        isRunnerCommand(command) ? "runner_process" : "provisioner_command",
+                        lifecycle,
+                        timing: commandTiming,
+                        level: isRunnerCommand(command) ? .error : .warning
+                    )
                     if await retrySSHIfNeeded(error: error, stage: "provisioner", attempt: &attempt) {
                         await control.clearProvisioningHandle(handle)
                         continue
@@ -1007,6 +1174,12 @@ struct Runner: Sendable {
                     await control.clearProvisioningHandle(handle)
                     return .failed(logRedactor.redact(error))
                 case let .healthCheckFailed(message):
+                    logLifecyclePhaseFailed(
+                        isRunnerCommand(command) ? "runner_process" : "provisioner_command",
+                        lifecycle,
+                        timing: commandTiming,
+                        level: .warning
+                    )
                     logger.warning("healthCheck failed; terminating provisioner command wait: \(message)")
                     await control.terminateProvisioning()
                     Task.detached {
@@ -1016,6 +1189,12 @@ struct Runner: Sendable {
                     return .healthCheckFailed(message)
                 }
             } catch {
+                logLifecyclePhaseFailed(
+                    isRunnerCommand(command) ? "runner_process" : "provisioner_command",
+                    lifecycle,
+                    timing: commandTiming,
+                    level: isRunnerCommand(command) ? .error : .warning
+                )
                 if await retrySSHIfNeeded(error: error, stage: "provisioner", attempt: &attempt) {
                     continue
                 }
@@ -1027,7 +1206,9 @@ struct Runner: Sendable {
     private func runProvisionerHandle(
         _ handle: ProcessHandle,
         command: String,
-        healthCheckState: HealthCheckState
+        healthCheckState: HealthCheckState,
+        lifecycle: RunnerLifecycleContext,
+        timing: LifecycleTiming
     ) async -> ProvisionerSequenceOutcome {
         let logRedactor = ProvisionerLogRedactor(command: command)
         let redactedCommand = logRedactor.redact(command)
@@ -1053,10 +1234,13 @@ struct Runner: Sendable {
             if isRunnerCommand(command) {
                 logger.warning("github runner exited with code \(result.exitCode)")
             }
+            logLifecyclePhaseComplete("runner_process", lifecycle, timing: timing, level: .info)
             return .completed
         case let .failed(error):
+            logLifecyclePhaseFailed("runner_process", lifecycle, timing: timing, level: .error)
             return .failed(logRedactor.redact(error))
         case let .healthCheckFailed(message):
+            logLifecyclePhaseFailed("runner_process", lifecycle, timing: timing, level: .warning)
             logger.warning(
                 "isolated healthCheck failed; terminating provisioner command wait: \(message)"
             )
@@ -1213,6 +1397,61 @@ struct Runner: Sendable {
             logger.warning("restart backoff \(delay)s")
         }
         try await Task.sleep(nanoseconds: nanos(from: delay))
+    }
+
+    private func logLifecyclePhaseStart(
+        _ phase: String,
+        _ lifecycle: RunnerLifecycleContext,
+        level: LogLevel = .info
+    ) -> LifecycleTiming {
+        let timing = LifecycleTiming()
+        logger.log(
+            level,
+            "lifecycle phase=\(phase) outcome=start \(lifecycle.metadata()) \(timing.startMetadata())"
+        )
+        return timing
+    }
+
+    private func logLifecyclePhaseComplete(
+        _ phase: String,
+        _ lifecycle: RunnerLifecycleContext,
+        timing: LifecycleTiming,
+        level: LogLevel = .info
+    ) {
+        logger.log(
+            level,
+            "lifecycle phase=\(phase) outcome=complete \(lifecycle.metadata()) "
+                + "\(timing.completionMetadata())"
+        )
+    }
+
+    private func logLifecyclePhaseFailed(
+        _ phase: String,
+        _ lifecycle: RunnerLifecycleContext,
+        timing: LifecycleTiming,
+        level: LogLevel = .warning
+    ) {
+        logger.log(
+            level,
+            "lifecycle phase=\(phase) outcome=failed \(lifecycle.metadata()) "
+                + "\(timing.completionMetadata())"
+        )
+    }
+
+    private func logProvisionerSequenceOutcome(
+        _ outcome: ProvisionerSequenceOutcome,
+        phase: String,
+        lifecycle: RunnerLifecycleContext,
+        timing: LifecycleTiming
+    ) {
+        switch outcome {
+        case .completed:
+            logLifecyclePhaseComplete(phase, lifecycle, timing: timing, level: .info)
+        case .failed:
+            logLifecyclePhaseFailed(phase, lifecycle, timing: timing, level: .error)
+        case .healthCheckFailed:
+            logLifecyclePhaseFailed(phase, lifecycle, timing: timing, level: .warning)
+        }
     }
 
     private func logLines(logger: Logger, _ text: String, level: LogLevel) {

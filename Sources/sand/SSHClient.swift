@@ -28,6 +28,13 @@ struct SSHClient {
     }
 
     func start(command: String) throws -> ProcessHandle {
+        try start(command: command, outputHandler: nil)
+    }
+
+    func start(
+        command: String,
+        outputHandler: ProcessOutputHandler?
+    ) throws -> ProcessHandle {
         let escaped = command.replacingOccurrences(of: "'", with: "'\"'\"'")
         let remote = "/bin/bash -lc '\(escaped)'"
         return try processRunner.start(
@@ -44,7 +51,8 @@ struct SSHClient {
                 "-p", String(config.port),
                 "\(config.user)@\(host)",
                 remote
-            ]
+            ],
+            outputHandler: outputHandler
         )
     }
 

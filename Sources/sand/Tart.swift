@@ -220,12 +220,17 @@ struct Tart: Sendable {
         return try await waitForProcess(handle, timeout: timeout)
     }
 
-    func startExec(name: String, command: String) throws -> ProcessHandle {
+    func startExec(
+        name: String,
+        command: String,
+        outputHandler: ProcessOutputHandler? = nil
+    ) throws -> ProcessHandle {
         logger.debug("tart exec \(name) \(command)")
         return try processRunner.startBounded(
             executable: executable,
             arguments: ["exec", name, "/bin/bash", "-lc", command],
-            maximumCaptureBytes: 1_024 * 1_024
+            maximumCaptureBytes: 1_024 * 1_024,
+            outputHandler: outputHandler
         )
     }
 
@@ -240,14 +245,19 @@ struct Tart: Sendable {
         command: String,
         preflightCommand: String? = nil,
         policyControl: any SoftnetPolicyControlling,
-        blockTargets: [String]
+        blockTargets: [String],
+        outputHandler: ProcessOutputHandler? = nil
     ) async throws -> ProcessHandle {
         try await policyControl.replacePolicy(allow: [], block: blockTargets)
         logger.info("Softnet network isolation applied")
         let isolatedCommand = preflightCommand.map {
             "\($0)\n\(command)"
         } ?? command
-        return try startExec(name: readiness.vmName, command: isolatedCommand)
+        return try startExec(
+            name: readiness.vmName,
+            command: isolatedCommand,
+            outputHandler: outputHandler
+        )
     }
 
     func ip(name: String, wait: Int) async throws -> String {

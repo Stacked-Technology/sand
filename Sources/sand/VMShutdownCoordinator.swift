@@ -2,6 +2,7 @@ import Foundation
 
 actor VMShutdownCoordinator {
     private var activeName: String?
+    private var activeLifecycle: RunnerLifecycleContext?
     private var runHandle: ProcessHandle?
     private var cleanupStarted = false
     private var cleanupTask: Task<Void, Never>?
@@ -23,12 +24,14 @@ actor VMShutdownCoordinator {
         self.logger = logger
     }
 
-    func activate(name: String) {
+    func activate(name: String, lifecycle: RunnerLifecycleContext? = nil) {
         activeName = name
+        activeLifecycle = lifecycle
         runHandle = nil
         cleanupStarted = false
         cleanupTask = nil
-        logger.info("shutdown coordinator activated for VM \(name)")
+        let context = lifecycle.map { " \($0.metadata())" } ?? ""
+        logger.info("shutdown coordinator activated for VM \(name)\(context)")
     }
 
     func setRunHandle(_ handle: ProcessHandle) async {
@@ -56,7 +59,13 @@ actor VMShutdownCoordinator {
             return
         }
         cleanupStarted = true
+        let teardownTiming = LifecycleTiming()
+        let lifecycleMetadata = activeLifecycle.map { " \($0.metadata())" } ?? ""
         logger.info("cleanup start for VM \(name) (reason: \(reasonLabel))")
+        logger.info(
+            "lifecycle phase=teardown start vm=\(name)\(lifecycleMetadata) "
+                + "\(teardownTiming.startMetadata())"
+        )
         let activeRunHandle = runHandle
         let destroy = self.destroy
         let task = Task {
@@ -68,7 +77,12 @@ actor VMShutdownCoordinator {
         cleanupTask = task
         await task.value
         logger.info("cleanup complete for VM \(name)")
+        logger.info(
+            "lifecycle phase=teardown complete vm=\(name)\(lifecycleMetadata) "
+                + "\(teardownTiming.completionMetadata())"
+        )
         activeName = nil
+        activeLifecycle = nil
         runHandle = nil
         cleanupTask = nil
     }
