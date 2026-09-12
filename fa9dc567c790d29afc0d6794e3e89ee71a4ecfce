@@ -1,0 +1,20 @@
+intent:
+  id: "intent/2026-09-12/stacked-runner-upgrade#faa1286cacaf"
+  change_type: fix
+  scope: runner
+  summary: "Make routine runner upgrades preserve installed operational state."
+  decision: "Stage and validate a pinned main-branch binary, refuse busy runners, reload gracefully with rollback, and keep setup separate from upgrades."
+  constraints:
+    - "Preserve configuration, LaunchAgent, logs, pool settings, labels, and repository discovery."
+    - "Do not modify the existing application setup helper or other projects."
+    - "Use exact source revision and binary digest provenance."
+    - "Keep non-upgrade shell commands delegated to the existing function."
+  intent_priority: should
+  code_locations:
+    - scripts/stacked-runner-upgrade.sh
+    - scripts/stacked-runner.zsh
+    - Tests/cases/stacked_runner_upgrade.t
+  requested_by: "@richardgetz"
+  recorded_by:
+    agent: codex
+    model: GPT-6
