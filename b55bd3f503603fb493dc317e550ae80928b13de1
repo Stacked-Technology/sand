@@ -1,0 +1,26 @@
+intent:
+  id: sand-runner-lifecycle-timings-20260912
+  change_type: feat
+  scope: sand.observability
+  summary: Measure disposable runner lifecycle phases before optimizing startup latency.
+  decision: Add bounded correlated timing events around polling, admission, VM lifecycle, provisioning and observable runner readiness using existing logs. Use monotonic elapsed durations and wall timestamps, and distinguish unavailable job correlation from known GitHub identifiers.
+  constraints:
+    - Preserve per-job ephemeral isolation, pool sizing, scheduling and existing configuration.
+    - Do not record secret values, tokens, environment dumps or raw provisioner commands in timing events.
+    - Bound streamed line capture and emit matching timing outcomes on failure.
+    - Keep THCYay and Codex source and release settings unchanged.
+  intent_priority: normal
+  code_locations:
+    - Sources/sand/LifecycleTiming.swift
+    - Sources/sand/ProcessRunner.swift
+    - Sources/sand/Runner.swift
+    - Sources/sand/RunnerPool.swift
+    - Sources/sand/GitHub/GitHubRunnerPoolMonitor.swift
+    - Sources/sand/SSHClient.swift
+    - Sources/sand/Tart.swift
+    - Sources/sand/VMShutdownCoordinator.swift
+    - Tests/sandTests
+  requested_by: user
+  recorded_by: codex
+  agent: /root
+  model: GPT-6
