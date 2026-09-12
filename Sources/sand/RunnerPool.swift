@@ -148,14 +148,14 @@ struct RunnerPoolSlot: Sendable {
     let index: Int
     let name: String
     let registrationName: String
-    private let runOperation: @Sendable () async throws -> Void
+    private let runOperation: @Sendable (RunnerLifecycleContext?) async throws -> Void
 
     init(index: Int, name: String, registrationName: String, runner: Runner) {
         self.index = index
         self.name = name
         self.registrationName = registrationName
-        self.runOperation = {
-            try await runner.run()
+        self.runOperation = { lifecycle in
+            try await runner.run(lifecycle: lifecycle)
         }
     }
 
@@ -168,11 +168,13 @@ struct RunnerPoolSlot: Sendable {
         self.index = index
         self.name = name
         self.registrationName = registrationName
-        self.runOperation = run
+        self.runOperation = { _ in
+            try await run()
+        }
     }
 
-    func run() async throws {
-        try await runOperation()
+    func run(lifecycle: RunnerLifecycleContext? = nil) async throws {
+        try await runOperation(lifecycle)
     }
 }
 
@@ -198,10 +200,25 @@ enum RunnerPoolScaler {
 }
 
 struct RunnerPool: Sendable {
+    private struct SlotAdmission: Sendable {
+        let lifecycle: RunnerLifecycleContext
+        let pollID: Int?
+        let observedQueuedJobs: [GitHubRunnerPoolJob]
+    }
+
     private enum Event: Sendable {
         case runnerFinished(index: Int, errorDescription: String?)
-        case snapshot(GitHubRunnerPoolSnapshot)
-        case pollFailed(message: String, retryAfter: TimeInterval?)
+        case snapshot(
+            GitHubRunnerPoolSnapshot,
+            pollID: Int,
+            timing: LifecycleTiming
+        )
+        case pollFailed(
+            message: String,
+            retryAfter: TimeInterval?,
+            pollID: Int,
+            timing: LifecycleTiming
+        )
         case restartBaseline(index: Int)
         case shutdown
     }
@@ -244,13 +261,38 @@ struct RunnerPool: Sendable {
         var pendingBaselineRestarts = Set<Int>()
         var baselineFailures: [Int: Int] = [:]
         var consecutivePollFailures = 0
+        var pollSequence = 0
+        var previousSnapshot: GitHubRunnerPoolSnapshot?
+        var slotAdmissions: [Int: SlotAdmission] = [:]
+        var queuedJobTimings: [Int64: LifecycleTiming] = [:]
 
         try await withThrowingTaskGroup(of: Event.self) { group in
-            func startRunner(at index: Int) {
+            func startRunner(
+                at index: Int,
+                pollID: Int? = nil,
+                observedQueuedJobs: [GitHubRunnerPoolJob] = []
+            ) {
                 let slot = slots[index]
                 activeIndices.insert(index)
                 recentlyFinishedIndices.remove(index)
-                logger.info("pool start runner \(slot.name) (slot \(index + 1)/\(config.max))")
+                let timing = LifecycleTiming()
+                let lifecycle = RunnerLifecycleContext(
+                    vmName: slot.name,
+                    runnerName: slot.registrationName,
+                    id: "pool-\(UUID().uuidString)",
+                    timing: timing
+                )
+                slotAdmissions[index] = SlotAdmission(
+                    lifecycle: lifecycle,
+                    pollID: pollID,
+                    observedQueuedJobs: observedQueuedJobs
+                )
+                let admissionLabel = pollID.map(String.init) ?? "startup"
+                logger.info(
+                    "pool start runner \(slot.name) (slot \(index + 1)/\(config.max)) "
+                        + "event=runner_admitted \(lifecycle.metadata()) poll=\(admissionLabel) "
+                        + "assignment=unattributed \(timing.startMetadata())"
+                )
                 group.addTask {
                     let slotID = UUID()
                     let startGate = RunnerPoolStartGate()
@@ -258,7 +300,7 @@ struct RunnerPool: Sendable {
                         await startGate.wait()
                         do {
                             try Task.checkCancellation()
-                            try await slot.run()
+                            try await slot.run(lifecycle: lifecycle)
                             return Event.runnerFinished(
                                 index: index,
                                 errorDescription: nil
@@ -296,21 +338,35 @@ struct RunnerPool: Sendable {
 
             func schedulePoll(after delay: TimeInterval) {
                 let monitor = monitor
+                pollSequence += 1
+                let pollID = pollSequence
                 group.addTask {
                     if delay > 0 {
                         try await Task.sleep(for: .seconds(delay))
                     }
+                    let timing = LifecycleTiming()
+                    logger.trace(
+                        "pool demand poll start poll=\(pollID) \(timing.startMetadata())"
+                    )
                     do {
-                        return .snapshot(try await monitor.snapshot())
+                        return .snapshot(
+                            try await monitor.snapshot(),
+                            pollID: pollID,
+                            timing: timing
+                        )
                     } catch let error as GitHubRunnerPoolMonitorError {
                         return .pollFailed(
                             message: error.description,
-                            retryAfter: error.retryAfter
+                            retryAfter: error.retryAfter,
+                            pollID: pollID,
+                            timing: timing
                         )
                     } catch {
                         return .pollFailed(
                             message: String(describing: error),
-                            retryAfter: nil
+                            retryAfter: nil,
+                            pollID: pollID,
+                            timing: timing
                         )
                     }
                 }
@@ -349,9 +405,13 @@ struct RunnerPool: Sendable {
                 case let .runnerFinished(index, errorDescription):
                     let slot = slots[index]
                     activeIndices.remove(index)
+                    let admission = slotAdmissions.removeValue(forKey: index)
                     if index < config.min {
                         let message = errorDescription ?? "runner exited unexpectedly"
-                        logger.error("pool baseline runner \(slot.name) exited: \(message)")
+                        let timingMetadata = admission.map {
+                            " \($0.lifecycle.metadata()) \($0.lifecycle.timing.completionMetadata())"
+                        } ?? ""
+                        logger.error("pool baseline runner \(slot.name) exited: \(message)\(timingMetadata)")
                         if !(await control.isShuttingDown()) {
                             scheduleBaselineRestart(at: index)
                         }
@@ -359,13 +419,63 @@ struct RunnerPool: Sendable {
                     }
                     recentlyFinishedIndices.insert(index)
                     if let errorDescription {
-                        logger.warning("pool burst runner \(slot.name) exited: \(errorDescription)")
+                        let timingMetadata = admission.map {
+                            " \($0.lifecycle.metadata()) \($0.lifecycle.timing.completionMetadata())"
+                        } ?? ""
+                        logger.warning("pool burst runner \(slot.name) exited: \(errorDescription)\(timingMetadata)")
                     } else {
-                        logger.info("pool burst runner \(slot.name) completed one job")
+                        let timingMetadata = admission.map {
+                            " \($0.lifecycle.metadata()) \($0.lifecycle.timing.completionMetadata())"
+                        } ?? ""
+                        logger.info("pool burst runner \(slot.name) completed one job\(timingMetadata)")
                     }
 
-                case let .snapshot(snapshot):
+                case let .snapshot(snapshot, pollID, pollTiming):
                     consecutivePollFailures = 0
+                    logger.debug(
+                        "pool demand poll complete poll=\(pollID) queued=\(snapshot.queuedJobs) "
+                            + "busy=\(snapshot.busyRunners) online=\(snapshot.onlineRunnerNames.count) "
+                            + "captured_at=\(LifecycleTiming.timestamp(snapshot.capturedAt)) "
+                            + "\(pollTiming.completionMetadata())"
+                    )
+                    for detail in snapshot.queuedJobDetails
+                        where queuedJobTimings[detail.id] == nil {
+                        let timing = LifecycleTiming()
+                        queuedJobTimings[detail.id] = timing
+                        logger.info(
+                            "pool demand detected event=job_queued_observed poll=\(pollID) "
+                                + "repo=\(safeLogIdentifier(detail.repository)) run_id=\(detail.runID) "
+                                + "job_id=\(detail.id) \(timing.startMetadata())"
+                        )
+                    }
+                    let previouslyQueued = Set(
+                        previousSnapshot?.queuedJobDetails.map(\.id) ?? []
+                    )
+                    let previouslyInProgress = Set(
+                        previousSnapshot?.inProgressJobDetails.map(\.id) ?? []
+                    )
+                    for detail in snapshot.inProgressJobDetails
+                        where previouslyQueued.contains(detail.id)
+                            || !previouslyInProgress.contains(detail.id) {
+                        let queueTiming = queuedJobTimings.removeValue(forKey: detail.id)
+                        let queueMetadata = queueTiming.map {
+                            " observed_queued_for_ms=\($0.elapsedMilliseconds())"
+                        } ?? ""
+                        logger.info(
+                            "pool job accepted event=job_in_progress poll=\(pollID) "
+                                + "repo=\(safeLogIdentifier(detail.repository)) run_id=\(detail.runID) "
+                                + "job_id=\(detail.id) runner=unattributed vm=unattributed "
+                                + "correlation=github-status-transition\(queueMetadata) "
+                                + "\(pollTiming.completionMetadata())"
+                        )
+                    }
+                    let activeJobIDs = Set(
+                        snapshot.queuedJobDetails.map(\.id)
+                            + snapshot.inProgressJobDetails.map(\.id)
+                    )
+                    queuedJobTimings = queuedJobTimings.filter {
+                        activeJobIDs.contains($0.key)
+                    }
                     recentlyFinishedIndices = Set(recentlyFinishedIndices.filter {
                         snapshot.onlineRunnerNames.contains(slots[$0].registrationName)
                     })
@@ -390,6 +500,38 @@ struct RunnerPool: Sendable {
                         busyRunners: effectiveBusyRunners,
                         queuedJobs: snapshot.queuedJobs
                     )
+                    let previousOnlineRunnerNames = previousSnapshot?.onlineRunnerNames ?? []
+                    var readyAdmissionIndices: [Int] = []
+                    for (index, admission) in slotAdmissions
+                        where snapshot.onlineRunnerNames.contains(slots[index].registrationName)
+                            && !previousOnlineRunnerNames.contains(slots[index].registrationName) {
+                        let observedQueuedJobs = admission.observedQueuedJobs
+                            .map(jobDetailLabel)
+                            .joined(separator: ",")
+                        let demandLabel = observedQueuedJobs.isEmpty
+                            ? "none"
+                            : observedQueuedJobs
+                        let pollLabel = admission.pollID.map(String.init) ?? "startup"
+                        logger.info(
+                            "pool runner ready event=runner_online_observed poll=\(pollID) "
+                                + "admission_poll=\(pollLabel) \(admission.lifecycle.metadata()) "
+                                + "observed_queued_jobs=\(demandLabel) "
+                                + "assignment=unattributed "
+                                + "correlation=pool-registration-observation "
+                                + "\(admission.lifecycle.timing.completionMetadata())"
+                        )
+                        readyAdmissionIndices.append(index)
+                    }
+                    for index in readyAdmissionIndices {
+                        guard let admission = slotAdmissions[index] else {
+                            continue
+                        }
+                        slotAdmissions[index] = SlotAdmission(
+                            lifecycle: admission.lifecycle,
+                            pollID: nil,
+                            observedQueuedJobs: []
+                        )
+                    }
                     logger.debug(
                         "pool snapshot queued=\(snapshot.queuedJobs) busy=\(snapshot.busyRunners) " +
                         "effectiveBusy=\(effectiveBusyRunners) active=\(activeIndices.count) " +
@@ -404,14 +546,26 @@ struct RunnerPool: Sendable {
                             !occupiedRegistrationIndices.contains($0) &&
                             !pendingBaselineRestarts.contains($0)
                         }
+                        logger.info(
+                            "pool capacity admission poll=\(pollID) desired=\(desired) "
+                                + "capacity=\(capacityIndices.count) needed=\(needed) "
+                                + "queued=\(snapshot.queuedJobs) observed_queued_jobs=\(snapshot.queuedJobDetails.map(jobDetailLabel).joined(separator: ",")) "
+                                + "assignment=unattributed "
+                                + "\(pollTiming.completionMetadata())"
+                        )
                         for index in inactive.prefix(needed) {
-                            startRunner(at: index)
+                            startRunner(
+                                at: index,
+                                pollID: pollID,
+                                observedQueuedJobs: snapshot.queuedJobDetails
+                            )
                         }
                     }
 
+                    previousSnapshot = snapshot
                     schedulePoll(after: config.pollInterval)
 
-                case let .pollFailed(message, retryAfter):
+                case let .pollFailed(message, retryAfter, pollID, pollTiming):
                     consecutivePollFailures += 1
                     let baseDelay = RunnerPoolScaler.retryDelay(
                         pollInterval: config.pollInterval,
@@ -422,7 +576,8 @@ struct RunnerPool: Sendable {
                     let delay = baseDelay + jitter
                     logger.warning(
                         "pool demand poll failed; keeping current capacity and retrying in " +
-                        "\(Int(delay.rounded(.up)))s: \(message)"
+                        "\(Int(delay.rounded(.up)))s poll=\(pollID) "
+                            + "\(pollTiming.completionMetadata()): \(message)"
                     )
                     schedulePoll(after: delay)
 
@@ -438,5 +593,18 @@ struct RunnerPool: Sendable {
                 }
             }
         }
+    }
+
+    private func safeLogIdentifier(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._:/-"))
+        let filtered = value.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? String(scalar) : "_"
+        }.joined()
+        let compact = filtered.isEmpty ? "unknown" : filtered
+        return compact.count <= 128 ? compact : String(compact.prefix(125)) + "..."
+    }
+
+    private func jobDetailLabel(_ detail: GitHubRunnerPoolJob) -> String {
+        "repo=\(safeLogIdentifier(detail.repository));run_id=\(detail.runID);job_id=\(detail.id)"
     }
 }

@@ -1,24 +1,38 @@
 import Foundation
 
+struct GitHubRunnerPoolJob: Equatable, Sendable {
+    let id: Int64
+    let runID: Int64
+    let repository: String
+}
+
 struct GitHubRunnerPoolSnapshot: Equatable, Sendable {
     let queuedJobs: Int
     let busyRunners: Int
     let onlineRunnerNames: Set<String>
     let capturedAt: Date
     let busyRunnerNames: Set<String>
+    let queuedJobDetails: [GitHubRunnerPoolJob]
+    let inProgressJobDetails: [GitHubRunnerPoolJob]
+
+    static let maximumJobDetails = 32
 
     init(
         queuedJobs: Int,
         busyRunners: Int,
         onlineRunnerNames: Set<String>,
         capturedAt: Date,
-        busyRunnerNames: Set<String> = []
+        busyRunnerNames: Set<String> = [],
+        queuedJobDetails: [GitHubRunnerPoolJob] = [],
+        inProgressJobDetails: [GitHubRunnerPoolJob] = []
     ) {
         self.queuedJobs = queuedJobs
         self.busyRunners = busyRunners
         self.onlineRunnerNames = onlineRunnerNames
         self.capturedAt = capturedAt
         self.busyRunnerNames = busyRunnerNames
+        self.queuedJobDetails = Array(queuedJobDetails.prefix(Self.maximumJobDetails))
+        self.inProgressJobDetails = Array(inProgressJobDetails.prefix(Self.maximumJobDetails))
     }
 }
 
@@ -90,6 +104,12 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
         let labels: [String]
     }
 
+    private struct MatchingJobs {
+        var queuedCount = 0
+        var queuedDetails: [GitHubRunnerPoolJob] = []
+        var inProgressDetails: [GitHubRunnerPoolJob] = []
+    }
+
     private struct RunnersResponse: Decodable {
         let totalCount: Int
         let runners: [RegisteredRunner]
@@ -148,15 +168,17 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
 
     private func snapshotWithCurrentToken() async throws -> GitHubRunnerPoolSnapshot {
         let token = try await installationAccessToken(allowInstallationRefresh: true)
-        async let queuedJobs = matchingQueuedJobs(token: token)
+        async let queuedJobs = matchingJobs(token: token)
         async let runnerState = registeredRunnerState(token: token)
         let (queued, state) = try await (queuedJobs, runnerState)
         return GitHubRunnerPoolSnapshot(
-            queuedJobs: queued,
+            queuedJobs: queued.queuedCount,
             busyRunners: state.busy,
             onlineRunnerNames: state.online,
             capturedAt: Date(),
-            busyRunnerNames: state.busyNames
+            busyRunnerNames: state.busyNames,
+            queuedJobDetails: queued.queuedDetails,
+            inProgressJobDetails: queued.inProgressDetails
         )
     }
 
@@ -209,7 +231,7 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
         return response.token
     }
 
-    private func matchingQueuedJobs(token: String) async throws -> Int {
+    private func matchingJobs(token: String) async throws -> MatchingJobs {
         let repositories = try await monitoredRepositories(token: token)
         var runIDsByRepository: [String: Set<Int64>] = [:]
         for repository in repositories {
@@ -237,32 +259,67 @@ actor GitHubRunnerPoolMonitor: GitHubRunnerPoolMonitoring {
             runIDsByRepository[repository] = runIDs
         }
 
-        var count = 0
+        var matching = MatchingJobs()
         for repository in repositories {
             for runID in runIDsByRepository[repository] ?? [] {
-                var page = 1
-                while true {
-                    let response: WorkflowJobsResponse = try await request(
-                        path: "/repos/\(organization)/\(repository)/actions/runs/\(runID)/jobs",
-                        method: "GET",
-                        token: token,
-                        queryItems: [
-                            URLQueryItem(name: "filter", value: "latest"),
-                            URLQueryItem(name: "per_page", value: "100"),
-                            URLQueryItem(name: "page", value: String(page))
-                        ]
-                    )
-                    count += response.jobs.filter { job in
-                        job.status == "queued" && matchLabels.isSubset(of: Set(job.labels))
-                    }.count
-                    if page * 100 >= response.totalCount || response.jobs.isEmpty {
-                        break
-                    }
-                    page += 1
-                }
+                try await collectMatchingJobs(
+                    repository: repository,
+                    runID: runID,
+                    token: token,
+                    into: &matching
+                )
             }
         }
-        return count
+        matching.queuedDetails.sort { lhs, rhs in
+            lhs.id == rhs.id ? lhs.repository < rhs.repository : lhs.id < rhs.id
+        }
+        matching.inProgressDetails.sort { lhs, rhs in
+            lhs.id == rhs.id ? lhs.repository < rhs.repository : lhs.id < rhs.id
+        }
+        matching.queuedDetails = Array(matching.queuedDetails.prefix(GitHubRunnerPoolSnapshot.maximumJobDetails))
+        matching.inProgressDetails = Array(matching.inProgressDetails.prefix(GitHubRunnerPoolSnapshot.maximumJobDetails))
+        return matching
+    }
+
+    private func collectMatchingJobs(
+        repository: String,
+        runID: Int64,
+        token: String,
+        into matching: inout MatchingJobs
+    ) async throws {
+        var page = 1
+        while true {
+            let response: WorkflowJobsResponse = try await request(
+                path: "/repos/\(organization)/\(repository)/actions/runs/\(runID)/jobs",
+                method: "GET",
+                token: token,
+                queryItems: [
+                    URLQueryItem(name: "filter", value: "latest"),
+                    URLQueryItem(name: "per_page", value: "100"),
+                    URLQueryItem(name: "page", value: String(page))
+                ]
+            )
+            for job in response.jobs where matchLabels.isSubset(of: Set(job.labels)) {
+                let detail = GitHubRunnerPoolJob(id: job.id, runID: runID, repository: repository)
+                switch job.status {
+                case "queued":
+                    matching.queuedCount += 1
+                    if matching.queuedDetails.count < GitHubRunnerPoolSnapshot.maximumJobDetails {
+                        matching.queuedDetails.append(detail)
+                    }
+                case "in_progress":
+                    if matching.inProgressDetails.count < GitHubRunnerPoolSnapshot.maximumJobDetails {
+                        matching.inProgressDetails.append(detail)
+                    }
+                default:
+                    continue
+                }
+            }
+            if page * 100 >= response.totalCount || response.jobs.isEmpty {
+                break
+            }
+            page += 1
+        }
     }
 
     private func monitoredRepositories(token: String) async throws -> [String] {

@@ -3,6 +3,21 @@ import Foundation
 import XCTest
 @testable import sand
 
+private final class LockedOutputLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        lock.withLock {
+            values.append(value)
+        }
+    }
+
+    func snapshot() -> [String] {
+        lock.withLock { values }
+    }
+}
+
 final class ProcessRunnerTests: XCTestCase {
     func testStartBoundedMapsDuplexSocketToChildStandardInput() async throws {
         var descriptors: [Int32] = [-1, -1]
@@ -192,5 +207,35 @@ touch '\(marker.path)'
 
         XCTAssertFalse(result.stdout.isEmpty)
         XCTAssertTrue(result.stdout.hasSuffix("é"))
+    }
+
+    func testOutputHandlerBoundsUnterminatedLinesAndPreservesMarkers() async throws {
+        let script = """
+        printf 'Listening for Jobs '
+        i=0
+        while [ "$i" -lt 70000 ]; do
+          printf x
+          i=$((i + 1))
+        done
+        printf '\\n'
+        """
+        let observedLines = LockedOutputLines()
+        let outputHandler: ProcessOutputHandler = { _, line in
+            observedLines.append(line)
+        }
+        let runner = SystemProcessRunner()
+        let handle = try runner.startBounded(
+            executable: "/bin/sh",
+            arguments: ["-c", script],
+            maximumCaptureBytes: 65_536,
+            outputHandler: outputHandler
+        )
+
+        let result = try await handle.waitAsync()
+
+        XCTAssertEqual(result.exitCode, 0)
+        let lines = observedLines.snapshot()
+        XCTAssertTrue(lines.contains { $0.hasPrefix("Listening for Jobs") })
+        XCTAssertTrue(lines.allSatisfy { $0.count <= 64 * 1_024 })
     }
 }

@@ -2,15 +2,27 @@ import Foundation
 import Darwin
 
 private final class PipeCapture: @unchecked Sendable {
+    private static let maximumPendingCharacters = 64 * 1_024
     private let fileHandle: FileHandle
     private let maximumBytes: Int
+    private let stream: ProcessOutputStream
     private let queue = DispatchQueue(label: "sand.process-pipe-capture")
     private var data = Data()
+    private var pendingLine = Data()
+    private var discardingOversizeLine = false
     private var finished = false
+    private var outputHandler: ProcessOutputHandler?
 
-    init(pipe: Pipe, maximumBytes: Int) {
+    init(
+        pipe: Pipe,
+        maximumBytes: Int,
+        stream: ProcessOutputStream,
+        outputHandler: ProcessOutputHandler?
+    ) {
         fileHandle = pipe.fileHandleForReading
         self.maximumBytes = maximumBytes
+        self.stream = stream
+        self.outputHandler = outputHandler
         fileHandle.readabilityHandler = { [weak self] handle in
             self?.consumeAvailableData(from: handle)
         }
@@ -22,6 +34,7 @@ private final class PipeCapture: @unchecked Sendable {
             if !finished {
                 finished = true
                 drainNonBlocking()
+                emitPendingLine()
                 try? fileHandle.close()
             }
             return String(decoding: data, as: UTF8.self)
@@ -35,6 +48,57 @@ private final class PipeCapture: @unchecked Sendable {
         data.append(chunk)
         if data.count > maximumBytes {
             data.removeFirst(data.count - maximumBytes)
+        }
+        guard outputHandler != nil else {
+            return
+        }
+        var start = chunk.startIndex
+        while start < chunk.endIndex {
+            guard let newline = chunk[start...].firstIndex(of: 0x0A) else {
+                if !discardingOversizeLine {
+                    let remainder = chunk[start...]
+                    let available = Self.maximumPendingCharacters - pendingLine.count
+                    if remainder.count <= available {
+                        pendingLine.append(contentsOf: remainder)
+                    } else {
+                        if available > 0 {
+                            pendingLine.append(contentsOf: remainder.prefix(available))
+                        }
+                        emitPendingLine()
+                        discardingOversizeLine = true
+                    }
+                }
+                return
+            }
+
+            if !discardingOversizeLine {
+                let line = chunk[start..<newline]
+                let available = Self.maximumPendingCharacters - pendingLine.count
+                if line.count <= available {
+                    pendingLine.append(contentsOf: line)
+                    emitPendingLine()
+                } else {
+                    if available > 0 {
+                        pendingLine.append(contentsOf: line.prefix(available))
+                    }
+                    emitPendingLine()
+                }
+            } else {
+                discardingOversizeLine = false
+            }
+            start = chunk.index(after: newline)
+        }
+    }
+
+    private func emitPendingLine() {
+        guard !pendingLine.isEmpty, let outputHandler else {
+            return
+        }
+        let line = String(decoding: pendingLine, as: UTF8.self)
+            .trimmingCharacters(in: .newlines)
+        pendingLine.removeAll(keepingCapacity: true)
+        if !line.isEmpty {
+            outputHandler(stream, line)
         }
     }
 
@@ -89,11 +153,22 @@ actor ProcessHandle {
         stdoutPipe: Pipe,
         stderrPipe: Pipe,
         command: [String],
-        maximumCaptureBytes: Int
+        maximumCaptureBytes: Int,
+        outputHandler: ProcessOutputHandler? = nil
     ) {
         self.process = process
-        self.stdoutCapture = PipeCapture(pipe: stdoutPipe, maximumBytes: maximumCaptureBytes)
-        self.stderrCapture = PipeCapture(pipe: stderrPipe, maximumBytes: maximumCaptureBytes)
+        self.stdoutCapture = PipeCapture(
+            pipe: stdoutPipe,
+            maximumBytes: maximumCaptureBytes,
+            stream: .stdout,
+            outputHandler: outputHandler
+        )
+        self.stderrCapture = PipeCapture(
+            pipe: stderrPipe,
+            maximumBytes: maximumCaptureBytes,
+            stream: .stderr,
+            outputHandler: outputHandler
+        )
         self.command = command
         self.waitAsyncBlock = nil
         self.terminateBlock = nil
@@ -292,10 +367,21 @@ enum ProcessRunnerError: Error {
 protocol ProcessRunning: Sendable {
     func run(executable: String, arguments: [String], wait: Bool) async throws -> ProcessResult?
     func start(executable: String, arguments: [String]) throws -> ProcessHandle
+    func start(
+        executable: String,
+        arguments: [String],
+        outputHandler: ProcessOutputHandler?
+    ) throws -> ProcessHandle
     func startBounded(
         executable: String,
         arguments: [String],
         maximumCaptureBytes: Int
+    ) throws -> ProcessHandle
+    func startBounded(
+        executable: String,
+        arguments: [String],
+        maximumCaptureBytes: Int,
+        outputHandler: ProcessOutputHandler?
     ) throws -> ProcessHandle
     func startBounded(
         executable: String,
@@ -306,10 +392,27 @@ protocol ProcessRunning: Sendable {
 }
 
 extension ProcessRunning {
+    func start(
+        executable: String,
+        arguments: [String],
+        outputHandler _: ProcessOutputHandler?
+    ) throws -> ProcessHandle {
+        try start(executable: executable, arguments: arguments)
+    }
+
     func startBounded(
         executable: String,
         arguments: [String],
         maximumCaptureBytes _: Int
+    ) throws -> ProcessHandle {
+        try start(executable: executable, arguments: arguments)
+    }
+
+    func startBounded(
+        executable: String,
+        arguments: [String],
+        maximumCaptureBytes _: Int,
+        outputHandler _: ProcessOutputHandler?
     ) throws -> ProcessHandle {
         try start(executable: executable, arguments: arguments)
     }
@@ -354,7 +457,21 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
         try start(
             executable: executable,
             arguments: arguments,
-            maximumCaptureBytes: Self.streamingCaptureBytes
+            maximumCaptureBytes: Self.streamingCaptureBytes,
+            outputHandler: nil
+        )
+    }
+
+    func start(
+        executable: String,
+        arguments: [String],
+        outputHandler: ProcessOutputHandler?
+    ) throws -> ProcessHandle {
+        try start(
+            executable: executable,
+            arguments: arguments,
+            maximumCaptureBytes: Self.streamingCaptureBytes,
+            outputHandler: outputHandler
         )
     }
 
@@ -366,7 +483,22 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
         try start(
             executable: executable,
             arguments: arguments,
-            maximumCaptureBytes: maximumCaptureBytes
+            maximumCaptureBytes: maximumCaptureBytes,
+            outputHandler: nil
+        )
+    }
+
+    func startBounded(
+        executable: String,
+        arguments: [String],
+        maximumCaptureBytes: Int,
+        outputHandler: ProcessOutputHandler?
+    ) throws -> ProcessHandle {
+        try start(
+            executable: executable,
+            arguments: arguments,
+            maximumCaptureBytes: maximumCaptureBytes,
+            outputHandler: outputHandler
         )
     }
 
@@ -388,7 +520,8 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
         executable: String,
         arguments: [String],
         maximumCaptureBytes: Int,
-        standardInputDescriptor: Int32? = nil
+        standardInputDescriptor: Int32? = nil,
+        outputHandler: ProcessOutputHandler? = nil
     ) throws -> ProcessHandle {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -410,7 +543,8 @@ struct SystemProcessRunner: ProcessRunning, Sendable {
             stdoutPipe: stdoutPipe,
             stderrPipe: stderrPipe,
             command: command,
-            maximumCaptureBytes: maximumCaptureBytes
+            maximumCaptureBytes: maximumCaptureBytes,
+            outputHandler: outputHandler
         )
     }
 }
