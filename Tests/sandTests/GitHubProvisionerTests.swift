@@ -74,6 +74,31 @@ final class GitHubProvisionerTests: XCTestCase {
         XCTAssertFalse(joined.contains("--runnergroup"))
     }
 
+    func testSetupScriptBatchesStepsWithoutEscapingCacheBranches() {
+        let provisioner = GitHubProvisioner()
+        let config = GitHubProvisionerConfig(
+            appId: 1,
+            organization: "org",
+            repository: nil,
+            privateKeyPath: "/tmp/key.pem",
+            runnerName: "runner-1",
+            extraLabels: nil
+        )
+        let plan = provisioner.script(
+            config: config,
+            runnerToken: "token",
+            runnerVersion: "2.999.0",
+            cacheDirectory: "sand-cache"
+        )
+
+        XCTAssertEqual(plan.setupScript.components(separatedBy: "\n(\n").count, 7)
+        XCTAssertTrue(plan.setupScript.hasPrefix("set -e\n(\n"))
+        XCTAssertTrue(plan.setupScript.contains("exit 0"))
+        XCTAssertTrue(plan.setupScript.contains("\n)\n(\nrm -rf ~/actions-runner"))
+        XCTAssertTrue(plan.setupScript.contains("config.sh"))
+        XCTAssertTrue(plan.setupScript.contains("echo \"Runner script downloaded, starting ~/actions-runner/run.sh\""))
+    }
+
     func testScriptDefaultsToEphemeralRunner() {
         let provisioner = GitHubProvisioner()
         let config = GitHubProvisionerConfig(

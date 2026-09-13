@@ -422,7 +422,7 @@ struct Runner: Sendable {
                     cacheDirectory: runnerCacheInfo?.name
                 )
                 var outcome = await runProvisionerCommands(
-                    plan.setupCommands,
+                    [plan.setupScript],
                     ssh: ssh,
                     healthCheckState: healthCheckState,
                     lifecycle: lifecycle

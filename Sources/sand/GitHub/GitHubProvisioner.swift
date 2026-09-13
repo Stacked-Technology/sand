@@ -2,6 +2,17 @@ struct GitHubProvisioningPlan {
     let setupCommands: [String]
     let runnerCommand: String
 
+    /// Executes the setup steps in one SSH shell while keeping each step's
+    /// environment and exit status isolated. The runner cache script uses
+    /// `exit 0` for a successful cache branch; wrapping each command in a
+    /// subshell keeps that branch from skipping the remaining setup steps.
+    var setupScript: String {
+        let steps = setupCommands.map { command in
+            "(\n\(command)\n)"
+        }
+        return (["set -e"] + steps).joined(separator: "\n")
+    }
+
     var allCommands: [String] {
         setupCommands + [runnerCommand]
     }
