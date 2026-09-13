@@ -1,0 +1,25 @@
+{
+  "runners": [
+    {
+      "name": "sand-release-smoke-example",
+      "stopAfter": 1,
+      "vm": {
+        "source": {
+          "type": "oci",
+          "image": "ghcr.io/cirruslabs/macos-tahoe-xcode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "provisioner": {
+        "type": "github",
+        "config": {
+          "appId": 1,
+          "organization": "example",
+          "privateKeyPath": "/dev/null",
+          "runnerName": "sand-release-smoke-example",
+          "ephemeral": true,
+          "extraLabels": ["sand-release-smoke", "sand-release-smoke-example"]
+        }
+      }
+    }
+  ]
+}

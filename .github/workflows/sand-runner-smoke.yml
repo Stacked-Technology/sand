@@ -1,0 +1,50 @@
+name: Sand Runner Smoke
+run-name: Sand runner smoke ${{ inputs.smoke_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "Unique label on the disposable Sand runner"
+        required: true
+        type: string
+      runner_name:
+        description: "Unique VM and GitHub runner name"
+        required: true
+        type: string
+      smoke_id:
+        description: "Unique smoke identifier for correlation"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Sand runner lifecycle smoke
+    runs-on: [self-hosted, sand-release-smoke, "${{ inputs.runner_label }}"]
+    timeout-minutes: 20
+    steps:
+      - name: Validate smoke identity
+        shell: bash
+        env:
+          SMOKE_ID: ${{ inputs.smoke_id }}
+          RUNNER_LABEL: ${{ inputs.runner_label }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.runner_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_LABEL" =~ ^sand-release-smoke-[a-z0-9-]+$ ]]
+          [[ "$EXPECTED_RUNNER_NAME" =~ ^sand-release-smoke-[A-Za-z0-9-]+$ ]]
+          [[ "$SMOKE_ID" =~ ^sand-smoke-[A-Za-z0-9._-]+$ ]]
+          [[ "${RUNNER_NAME:-}" == "$EXPECTED_RUNNER_NAME" ]]
+          printf 'sand_smoke_started id=%s runner=%s\n' "$SMOKE_ID" "$RUNNER_NAME"
+      - name: Verify runner can execute a clean job
+        shell: bash
+        env:
+          SMOKE_ID: ${{ inputs.smoke_id }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.runner_name }}
+        run: |
+          set -euo pipefail
+          [[ "${RUNNER_NAME:-}" == "$EXPECTED_RUNNER_NAME" ]]
+          printf 'sand_smoke_success id=%s runner=%s\n' "$SMOKE_ID" "$RUNNER_NAME"
